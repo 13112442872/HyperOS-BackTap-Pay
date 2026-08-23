@@ -1,7 +1,11 @@
 package com.mike.hyperosbacktappay;
 
+import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 
@@ -22,6 +26,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private volatile XSharedPreferences preferences;
     private volatile boolean statusPublished;
+    private volatile boolean controlReceiverRegistered;
+    private BroadcastReceiver controlReceiver;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -46,7 +52,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     for (Object arg : param.args) {
                         if (Config.FUNCTION_PAYMENT.equals(arg) || Config.FUNCTION_BUS.equals(arg)) {
                             function = (String) arg;
-                        } else if (Config.SETTING_BACK_DOUBLE.equals(arg) || Config.SETTING_BACK_TRIPLE.equals(arg)) {
+                        } else if (Config.SETTING_BACK_DOUBLE.equals(arg)
+                                || Config.SETTING_BACK_TRIPLE.equals(arg)) {
                             shortcut = (String) arg;
                         }
                     }
@@ -96,10 +103,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     try {
                         Object value = XposedHelpers.getObjectField(param.thisObject, "mSystemContext");
                         if (value instanceof Context) {
-                            publishHookStatus((Context) value);
+                            Context context = (Context) value;
+                            registerControlReceiver(context);
+                            publishHookStatus(context);
                         }
                     } catch (Throwable t) {
-                        XposedBridge.log(TAG + ": unable to publish startup status");
+                        XposedBridge.log(TAG + ": unable to initialize system-server bridge");
                         XposedBridge.log(t);
                     }
                 }
@@ -108,6 +117,72 @@ public final class HookEntry implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": status hook unavailable; status will be published on first shortcut trigger");
             XposedBridge.log(t);
         }
+    }
+
+    private synchronized void registerControlReceiver(Context context) {
+        if (controlReceiverRegistered || context == null) {
+            return;
+        }
+
+        controlReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context receiverContext, Intent intent) {
+                if (intent == null || !Config.ACTION_SET_GESTURE.equals(intent.getAction())) {
+                    return;
+                }
+
+                String settingKey = intent.getStringExtra(Config.EXTRA_SETTING_KEY);
+                String function = intent.getStringExtra(Config.EXTRA_FUNCTION);
+                if (!isAllowedSetting(settingKey) || !isAllowedFunction(function)) {
+                    XposedBridge.log(TAG + ": rejected invalid control request");
+                    return;
+                }
+
+                try {
+                    boolean ok = Settings.System.putString(
+                            receiverContext.getContentResolver(),
+                            settingKey,
+                            function
+                    );
+                    XposedBridge.log(TAG + ": system_server write " + settingKey + "=" + function
+                            + " result=" + ok);
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + ": system_server gesture write failed");
+                    XposedBridge.log(t);
+                }
+            }
+        };
+
+        IntentFilter filter = new IntentFilter(Config.ACTION_SET_GESTURE);
+        if (Build.VERSION.SDK_INT >= 33) {
+            context.registerReceiver(
+                    controlReceiver,
+                    filter,
+                    Config.CONTROL_PERMISSION,
+                    null,
+                    Context.RECEIVER_EXPORTED
+            );
+        } else {
+            context.registerReceiver(
+                    controlReceiver,
+                    filter,
+                    Config.CONTROL_PERMISSION,
+                    null
+            );
+        }
+        controlReceiverRegistered = true;
+        XposedBridge.log(TAG + ": system-server control receiver registered");
+    }
+
+    private static boolean isAllowedSetting(String settingKey) {
+        return Config.SETTING_BACK_DOUBLE.equals(settingKey)
+                || Config.SETTING_BACK_TRIPLE.equals(settingKey);
+    }
+
+    private static boolean isAllowedFunction(String function) {
+        return Config.FUNCTION_NONE.equals(function)
+                || Config.FUNCTION_PAYMENT.equals(function)
+                || Config.FUNCTION_BUS.equals(function);
     }
 
     private int readDisplayId(String prefKey) {
@@ -135,7 +210,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
             try {
                 Object value = XposedHelpers.getObjectField(object, fieldName);
                 if (value instanceof Context) {
-                    publishHookStatus((Context) value);
+                    Context context = (Context) value;
+                    registerControlReceiver(context);
+                    publishHookStatus(context);
                     return;
                 }
             } catch (Throwable ignored) {
