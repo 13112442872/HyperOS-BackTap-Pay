@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <permission
+        android:name="com.mike.hyperosbacktappay.permission.CONTROL_BACKTAP"
+        android:protectionLevel="signature" />
+
+    <uses-permission android:name="com.mike.hyperosbacktappay.permission.CONTROL_BACKTAP" />
 
     <application
         android:allowBackup="false"
