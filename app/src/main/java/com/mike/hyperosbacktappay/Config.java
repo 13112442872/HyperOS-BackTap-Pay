@@ -22,6 +22,13 @@ public final class Config {
     public static final int DISPLAY_ID_MAIN = 0;
     public static final int DISPLAY_ID_REAR = 1;
 
+    public static final String ACTION_SET_GESTURE =
+            "com.mike.hyperosbacktappay.action.SET_GESTURE";
+    public static final String CONTROL_PERMISSION =
+            "com.mike.hyperosbacktappay.permission.CONTROL_BACKTAP";
+    public static final String EXTRA_SETTING_KEY = "setting_key";
+    public static final String EXTRA_FUNCTION = "function";
+
     public static final String STATUS_HOOK_VERSION = "hyperos_backtap_pay_hook_version";
     public static final String STATUS_HOOK_BOOT_COUNT = "hyperos_backtap_pay_hook_boot_count";
 }
