@@ -1,11 +1,15 @@
 package com.mike.hyperosbacktappay;
 
+import android.content.ContentResolver;
+import android.content.Context;
 import android.os.Bundle;
+import android.provider.Settings;
 
 import java.lang.reflect.Method;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
@@ -15,10 +19,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final String SYSTEM_PACKAGE = "android";
     private static final String TARGET_CLASS = "com.miui.server.input.util.ShortCutActionsUtils";
     private static final String TARGET_METHOD = "triggerFunction";
-    private static final String TARGET_FUNCTION = "launch_alipay_payment_code";
-    private static final String TARGET_SHORTCUT = "back_double_tap";
-    private static final String DISPLAY_KEY = "show_code_display";
-    private static final int SUB_SCREEN_DISPLAY_ID = 1;
+
+    private volatile XSharedPreferences preferences;
+    private volatile boolean statusPublished;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -26,29 +29,37 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return;
         }
 
+        preferences = new XSharedPreferences(Config.MODULE_PACKAGE, Config.PREFS_NAME);
+        hookShortcutActions(lpparam.classLoader);
+        hookSystemStatus(lpparam.classLoader);
+    }
+
+    private void hookShortcutActions(ClassLoader classLoader) {
         try {
-            Class<?> clazz = XposedHelpers.findClass(TARGET_CLASS, lpparam.classLoader);
+            Class<?> clazz = XposedHelpers.findClass(TARGET_CLASS, classLoader);
             XposedBridge.hookAllMethods(clazz, TARGET_METHOD, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    boolean isPaymentCode = false;
-                    boolean isBackDoubleTap = false;
+                    String function = null;
+                    String shortcut = null;
 
                     for (Object arg : param.args) {
-                        if (TARGET_FUNCTION.equals(arg)) {
-                            isPaymentCode = true;
-                        } else if (TARGET_SHORTCUT.equals(arg)) {
-                            isBackDoubleTap = true;
+                        if (Config.FUNCTION_PAYMENT.equals(arg) || Config.FUNCTION_BUS.equals(arg)) {
+                            function = (String) arg;
+                        } else if (Config.SETTING_BACK_DOUBLE.equals(arg) || Config.SETTING_BACK_TRIPLE.equals(arg)) {
+                            shortcut = (String) arg;
                         }
                     }
 
-                    if (!isPaymentCode || !isBackDoubleTap) {
+                    if (function == null || shortcut == null) {
                         return;
                     }
 
+                    publishStatusFromShortcutObject(param.thisObject);
+
                     int bundleIndex = findBundleArgument(param);
                     if (bundleIndex < 0) {
-                        XposedBridge.log(TAG + ": matched BackTap payment action, but no Bundle parameter was found");
+                        XposedBridge.log(TAG + ": matched BackTap Alipay action, but no Bundle parameter was found");
                         return;
                     }
 
@@ -58,15 +69,105 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         param.args[bundleIndex] = bundle;
                     }
 
-                    bundle.putInt(DISPLAY_KEY, SUB_SCREEN_DISPLAY_ID);
-                    XposedBridge.log(TAG + ": forced " + DISPLAY_KEY + "=" + SUB_SCREEN_DISPLAY_ID
-                            + " for " + TARGET_SHORTCUT + " -> " + TARGET_FUNCTION);
+                    String prefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
+                            ? Config.PREF_TRIPLE_DISPLAY
+                            : Config.PREF_DOUBLE_DISPLAY;
+                    int displayId = readDisplayId(prefKey);
+                    bundle.putInt(Config.DISPLAY_BUNDLE_KEY, displayId);
+
+                    XposedBridge.log(TAG + ": set " + Config.DISPLAY_BUNDLE_KEY + "=" + displayId
+                            + " for " + shortcut + " -> " + function);
                 }
             });
 
             XposedBridge.log(TAG + ": hooked " + TARGET_CLASS + "#" + TARGET_METHOD);
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": hook failed");
+            XposedBridge.log(TAG + ": shortcut hook failed");
+            XposedBridge.log(t);
+        }
+    }
+
+    private void hookSystemStatus(ClassLoader classLoader) {
+        try {
+            Class<?> systemServer = XposedHelpers.findClass("com.android.server.SystemServer", classLoader);
+            XposedBridge.hookAllMethods(systemServer, "startOtherServices", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object value = XposedHelpers.getObjectField(param.thisObject, "mSystemContext");
+                        if (value instanceof Context) {
+                            publishHookStatus((Context) value);
+                        }
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + ": unable to publish startup status");
+                        XposedBridge.log(t);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": status hook unavailable; status will be published on first shortcut trigger");
+            XposedBridge.log(t);
+        }
+    }
+
+    private int readDisplayId(String prefKey) {
+        String display = Config.DISPLAY_REAR;
+        try {
+            XSharedPreferences prefs = preferences;
+            if (prefs != null) {
+                prefs.reload();
+                display = prefs.getString(prefKey, Config.DISPLAY_REAR);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": preference reload failed, using rear display fallback");
+            XposedBridge.log(t);
+        }
+        return Config.DISPLAY_MAIN.equals(display) ? Config.DISPLAY_ID_MAIN : Config.DISPLAY_ID_REAR;
+    }
+
+    private void publishStatusFromShortcutObject(Object object) {
+        if (statusPublished || object == null) {
+            return;
+        }
+
+        String[] fieldNames = {"mContext", "mSystemContext"};
+        for (String fieldName : fieldNames) {
+            try {
+                Object value = XposedHelpers.getObjectField(object, fieldName);
+                if (value instanceof Context) {
+                    publishHookStatus((Context) value);
+                    return;
+                }
+            } catch (Throwable ignored) {
+                // Try the next common field name.
+            }
+        }
+    }
+
+    private void publishHookStatus(Context context) {
+        if (context == null) {
+            return;
+        }
+        try {
+            ContentResolver resolver = context.getContentResolver();
+            int bootCount = Settings.Global.getInt(resolver, Settings.Global.BOOT_COUNT, -1);
+            boolean versionOk = Settings.System.putString(
+                    resolver,
+                    Config.STATUS_HOOK_VERSION,
+                    BuildConfig.VERSION_NAME
+            );
+            boolean bootOk = Settings.System.putInt(
+                    resolver,
+                    Config.STATUS_HOOK_BOOT_COUNT,
+                    bootCount
+            );
+            statusPublished = versionOk && bootOk;
+            if (statusPublished) {
+                XposedBridge.log(TAG + ": published Hook status version=" + BuildConfig.VERSION_NAME
+                        + ", bootCount=" + bootCount);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": failed to publish Hook status");
             XposedBridge.log(t);
         }
     }
