@@ -1,4 +1,4 @@
-name: Build LSPosed APK
+name: Build Release APK
 
 on:
   push:
@@ -33,58 +33,33 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Read app version
+      - name: Read version name
         id: version
         shell: bash
         run: |
-          VERSION=$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle | head -n 1)
-          if [ -z "$VERSION" ]; then
-            echo "Unable to read versionName from app/build.gradle"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          VERSION=$(grep -oP "versionName '\K[^']+" app/build.gradle)
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build debug and release APKs
-        run: gradle --no-daemon :app:assembleDebug :app:assembleRelease
+      - name: Build release APK
+        run: gradle --no-daemon :app:assembleRelease
 
-      - name: Collect APKs
-        shell: bash
+      - name: Collect release APK
         run: |
           mkdir -p out
-          VERSION="${{ steps.version.outputs.version }}"
-          cp app/build/outputs/apk/debug/app-debug.apk "out/HyperOS-BackTap-Pay-v${VERSION}-debug.apk"
-          cp app/build/outputs/apk/release/app-release.apk "out/HyperOS-BackTap-Pay-v${VERSION}-release.apk"
-
-      - name: Upload debug APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: HyperOS-BackTap-Pay-v${{ steps.version.outputs.version }}-debug
-          path: out/HyperOS-BackTap-Pay-v${{ steps.version.outputs.version }}-debug.apk
-          if-no-files-found: error
-          retention-days: 30
+          cp app/build/outputs/apk/release/app-release.apk "out/HyperOS-BackTap-Pay-v${{ steps.version.outputs.name }}-release.apk"
 
       - name: Upload release APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HyperOS-BackTap-Pay-v${{ steps.version.outputs.version }}-release
-          path: out/HyperOS-BackTap-Pay-v${{ steps.version.outputs.version }}-release.apk
+          name: HyperOS-BackTap-Pay-v${{ steps.version.outputs.name }}-release
+          path: out/HyperOS-BackTap-Pay-v${{ steps.version.outputs.name }}-release.apk
           if-no-files-found: error
           retention-days: 30
 
       - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
-        shell: bash
-        run: |
-          APK="out/HyperOS-BackTap-Pay-v${VERSION}-release.apk"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK" --clobber
-          else
-            gh release create "$TAG" "$APK" \
-              --target "$GITHUB_SHA" \
-              --title "HyperOS BackTap Pay $TAG" \
-              --notes "HyperOS BackTap Pay $TAG\n\n- 支持背部双击/三击\n- 支持支付宝付款码/乘车码\n- 支持主屏/背屏显示\n- 无需 Root 权限\n\n首次安装、升级模块或 Hook 版本变化后，请在 LSPosed 中确认系统框架作用域并重启手机一次。"
-          fi
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.name }}
+          name: HyperOS BackTap Pay v${{ steps.version.outputs.name }}
+          generate_release_notes: true
+          files: out/HyperOS-BackTap-Pay-v${{ steps.version.outputs.name }}-release.apk
