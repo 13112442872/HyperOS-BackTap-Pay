@@ -6,14 +6,14 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
-import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
@@ -28,13 +28,13 @@ public final class MainActivity extends Activity {
     private static final int COLOR_SUBTEXT = Color.rgb(105, 105, 112);
     private static final int COLOR_ACCENT = Color.rgb(22, 119, 255);
 
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
     private SharedPreferences preferences;
     private boolean sharedPreferencesReady;
     private boolean loadingUi;
 
     private TextView hookStatusText;
-    private TextView permissionStatusText;
-    private Button permissionButton;
     private GestureViews doubleTapViews;
     private GestureViews tripleTapViews;
 
@@ -84,8 +84,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        TextView title = text("HyperOS BackTap Pay", 26, COLOR_TEXT, true);
-        root.addView(title);
+        root.addView(text("HyperOS BackTap Pay", 26, COLOR_TEXT, true));
 
         TextView subtitle = text("澎湃 OS 背部轻敲支付宝快捷码", 14, COLOR_SUBTEXT, false);
         LinearLayout.LayoutParams subtitleLp = wrap();
@@ -94,7 +93,6 @@ public final class MainActivity extends Activity {
         root.addView(subtitle, subtitleLp);
 
         root.addView(buildStatusCard());
-        root.addView(buildPermissionCard(), cardSpacing());
 
         doubleTapViews = buildGestureCard(
                 "背部双击",
@@ -111,7 +109,7 @@ public final class MainActivity extends Activity {
         root.addView(tripleTapViews.card, cardSpacing());
 
         TextView footer = text(
-                "普通配置会自动保存并即时生效。首次启用模块或更新 APK 后，如状态未显示“Hook 已加载”，请手动重启手机一次。",
+                "模块不需要 Root，也不需要“修改系统设置”权限。功能切换由已加载到系统框架的 LSPosed Hook 完成；普通配置会自动保存并即时生效。",
                 13,
                 COLOR_SUBTEXT,
                 false
@@ -141,26 +139,6 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams scopeLp = wrap();
         scopeLp.topMargin = dp(8);
         card.addView(scope, scopeLp);
-        return card;
-    }
-
-    private View buildPermissionCard() {
-        LinearLayout card = card();
-        card.addView(sectionTitle("系统设置权限"));
-
-        permissionStatusText = text("正在检测…", 14, COLOR_SUBTEXT, false);
-        LinearLayout.LayoutParams statusLp = wrap();
-        statusLp.topMargin = dp(10);
-        card.addView(permissionStatusText, statusLp);
-
-        permissionButton = new Button(this);
-        permissionButton.setText("授予修改系统设置权限");
-        permissionButton.setTextSize(14);
-        permissionButton.setAllCaps(false);
-        permissionButton.setOnClickListener(v -> openWriteSettingsPermission());
-        LinearLayout.LayoutParams buttonLp = wrap();
-        buttonLp.topMargin = dp(10);
-        card.addView(permissionButton, buttonLp);
         return card;
     }
 
@@ -215,20 +193,7 @@ public final class MainActivity extends Activity {
             if (function == null) {
                 return;
             }
-            if (!Settings.System.canWrite(this)) {
-                toast("需要先授予“修改系统设置”权限；不需要 Root");
-                openWriteSettingsPermission();
-                refreshGesture(views);
-                return;
-            }
-
-            boolean ok = Settings.System.putString(getContentResolver(), views.settingKey, function);
-            if (ok) {
-                toast("配置已生效");
-            } else {
-                toast("写入系统手势设置失败");
-            }
-            refreshGesture(views);
+            requestGestureChange(views, function);
         });
 
         views.displayGroup.setOnCheckedChangeListener((group, checkedId) -> {
@@ -248,14 +213,59 @@ public final class MainActivity extends Activity {
         return views;
     }
 
+    private void requestGestureChange(GestureViews views, String function) {
+        if (!isCurrentHookLoaded()) {
+            toast("当前新版 Hook 尚未加载，请确认 LSPosed 作用域后重启手机一次");
+            refreshGesture(views);
+            return;
+        }
+
+        try {
+            Intent intent = new Intent(Config.ACTION_SET_GESTURE);
+            intent.putExtra(Config.EXTRA_SETTING_KEY, views.settingKey);
+            intent.putExtra(Config.EXTRA_FUNCTION, function);
+            sendBroadcast(intent);
+        } catch (Throwable t) {
+            toast("发送系统框架配置请求失败");
+            refreshGesture(views);
+            return;
+        }
+
+        mainHandler.postDelayed(() -> {
+            try {
+                String actual = Settings.System.getString(getContentResolver(), views.settingKey);
+                if (function.equals(actual)) {
+                    toast("配置已生效");
+                } else {
+                    toast("配置未写入，请查看 LSPosed 日志");
+                }
+            } catch (Throwable t) {
+                toast("无法验证系统手势配置");
+            }
+            refreshGesture(views);
+        }, 350);
+    }
+
     private void refreshAll() {
         refreshHookStatus();
-        refreshPermissionStatus();
         if (doubleTapViews != null) {
             refreshGesture(doubleTapViews);
         }
         if (tripleTapViews != null) {
             refreshGesture(tripleTapViews);
+        }
+    }
+
+    private boolean isCurrentHookLoaded() {
+        try {
+            String hookVersion = Settings.System.getString(getContentResolver(), Config.STATUS_HOOK_VERSION);
+            int hookBootCount = Settings.System.getInt(
+                    getContentResolver(), Config.STATUS_HOOK_BOOT_COUNT, Integer.MIN_VALUE);
+            int currentBootCount = Settings.Global.getInt(
+                    getContentResolver(), Settings.Global.BOOT_COUNT, Integer.MIN_VALUE);
+            return BuildConfig.VERSION_NAME.equals(hookVersion) && hookBootCount == currentBootCount;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -300,19 +310,6 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void refreshPermissionStatus() {
-        boolean allowed = Settings.System.canWrite(this);
-        if (allowed) {
-            permissionStatusText.setText("✓ 已授权。用于直接修改 HyperOS 原生 back_double_tap / back_triple_tap 设置，不需要 Root。 ");
-            permissionStatusText.setTextColor(Color.rgb(20, 135, 70));
-            permissionButton.setVisibility(View.GONE);
-        } else {
-            permissionStatusText.setText("需要 Android 的“修改系统设置”特殊权限，才能从本界面切换双击/三击功能。该权限不是 Root 权限。 ");
-            permissionStatusText.setTextColor(COLOR_SUBTEXT);
-            permissionButton.setVisibility(View.VISIBLE);
-        }
-    }
-
     private void refreshGesture(GestureViews views) {
         loadingUi = true;
         try {
@@ -330,7 +327,10 @@ public final class MainActivity extends Activity {
             } else if (currentFunction == null || Config.FUNCTION_NONE.equals(currentFunction)) {
                 views.actionGroup.check(views.offId);
             } else {
-                views.unknownActionText.setText("当前系统绑定为其他功能：" + currentFunction + "。选择上方任一项后本模块才会接管。 ");
+                views.unknownActionText.setText(
+                        "当前系统绑定为其他功能：" + currentFunction
+                                + "。选择上方任一项后本模块才会接管。"
+                );
                 views.unknownActionText.setVisibility(View.VISIBLE);
             }
 
@@ -347,26 +347,10 @@ public final class MainActivity extends Activity {
     }
 
     private static String functionForId(GestureViews views, int id) {
-        if (id == views.offId) {
-            return Config.FUNCTION_NONE;
-        }
-        if (id == views.paymentId) {
-            return Config.FUNCTION_PAYMENT;
-        }
-        if (id == views.busId) {
-            return Config.FUNCTION_BUS;
-        }
+        if (id == views.offId) return Config.FUNCTION_NONE;
+        if (id == views.paymentId) return Config.FUNCTION_PAYMENT;
+        if (id == views.busId) return Config.FUNCTION_BUS;
         return null;
-    }
-
-    private void openWriteSettingsPermission() {
-        try {
-            Intent intent = new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS);
-            intent.setData(Uri.parse("package:" + getPackageName()));
-            startActivity(intent);
-        } catch (Throwable t) {
-            toast("无法打开系统设置授权页面");
-        }
     }
 
     private void setDisplayGroupEnabled(RadioGroup group, boolean enabled) {
