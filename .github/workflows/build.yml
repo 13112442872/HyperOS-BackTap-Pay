@@ -33,18 +33,27 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Build debug and release APKs
+        run: gradle --no-daemon :app:assembleDebug :app:assembleRelease
 
-      - name: Collect APK
+      - name: Collect APKs
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/debug/app-debug.apk out/HyperOS-BackTap-Pay-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk out/HyperOS-BackTap-Pay-v0.2.1-debug.apk
+          cp app/build/outputs/apk/release/app-release.apk out/HyperOS-BackTap-Pay-v0.2.1-release.apk
 
-      - name: Upload APK artifact
+      - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HyperOS-BackTap-Pay-debug
-          path: out/HyperOS-BackTap-Pay-debug.apk
+          name: HyperOS-BackTap-Pay-v0.2.1-debug
+          path: out/HyperOS-BackTap-Pay-v0.2.1-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HyperOS-BackTap-Pay-v0.2.1-release
+          path: out/HyperOS-BackTap-Pay-v0.2.1-release.apk
           if-no-files-found: error
           retention-days: 30
