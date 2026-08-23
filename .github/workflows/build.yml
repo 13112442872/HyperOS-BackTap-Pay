@@ -40,6 +40,11 @@ jobs:
           VERSION=$(grep -oP "versionName '\K[^']+" app/build.gradle)
           echo "name=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Remove existing release for this version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "v${{ steps.version.outputs.name }}" --repo "${{ github.repository }}" --yes --cleanup-tag || true
+
       - name: Build release APK
         run: gradle --no-daemon :app:assembleRelease
 
