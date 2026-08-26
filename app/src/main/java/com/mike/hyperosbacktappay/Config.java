@@ -11,6 +11,10 @@ public final class Config {
     public static final String PREF_DOUBLE_DISPLAY = "double_display";
     public static final String PREF_TRIPLE_DISPLAY = "triple_display";
 
+    public static final String ACTION_NONE = "none";
+    public static final String ACTION_PAYMENT = "payment";
+    public static final String ACTION_BUS = "bus";
+
     public static final String DISPLAY_MAIN = "main";
     public static final String DISPLAY_REAR = "rear";
 
