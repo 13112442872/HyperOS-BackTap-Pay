@@ -6,8 +6,11 @@ public final class Config {
     public static final String MODULE_PACKAGE = "com.mike.hyperosbacktappay";
     public static final String PREFS_NAME = "config";
 
+    public static final String PREF_DOUBLE_ACTION = "double_action";
+    public static final String PREF_TRIPLE_ACTION = "triple_action";
     public static final String PREF_DOUBLE_DISPLAY = "double_display";
     public static final String PREF_TRIPLE_DISPLAY = "triple_display";
+
     public static final String DISPLAY_MAIN = "main";
     public static final String DISPLAY_REAR = "rear";
 

@@ -46,11 +46,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(clazz, TARGET_METHOD, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
+                    int functionIndex = -1;
                     String function = null;
                     String shortcut = null;
 
-                    for (Object arg : param.args) {
+                    for (int i = 0; i < param.args.length; i++) {
+                        Object arg = param.args[i];
                         if (Config.FUNCTION_PAYMENT.equals(arg) || Config.FUNCTION_BUS.equals(arg)) {
+                            functionIndex = i;
                             function = (String) arg;
                         } else if (Config.SETTING_BACK_DOUBLE.equals(arg)
                                 || Config.SETTING_BACK_TRIPLE.equals(arg)) {
@@ -58,11 +61,29 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         }
                     }
 
-                    if (function == null || shortcut == null) {
+                    if (functionIndex < 0 || function == null || shortcut == null) {
                         return;
                     }
 
                     publishStatusFromShortcutObject(param.thisObject);
+
+                    String actionPrefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
+                            ? Config.PREF_TRIPLE_ACTION
+                            : Config.PREF_DOUBLE_ACTION;
+                    String displayPrefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
+                            ? Config.PREF_TRIPLE_DISPLAY
+                            : Config.PREF_DOUBLE_DISPLAY;
+
+                    String configuredAction = readAction(actionPrefKey, function);
+                    if (Config.FUNCTION_PAYMENT.equals(configuredAction)
+                            || Config.FUNCTION_BUS.equals(configuredAction)) {
+                        if (!configuredAction.equals(function)) {
+                            param.args[functionIndex] = configuredAction;
+                            XposedBridge.log(TAG + ": remapped " + shortcut + " action "
+                                    + function + " -> " + configuredAction);
+                        }
+                        function = configuredAction;
+                    }
 
                     int bundleIndex = findBundleArgument(param);
                     if (bundleIndex < 0) {
@@ -76,10 +97,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         param.args[bundleIndex] = bundle;
                     }
 
-                    String prefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
-                            ? Config.PREF_TRIPLE_DISPLAY
-                            : Config.PREF_DOUBLE_DISPLAY;
-                    int displayId = readDisplayId(prefKey);
+                    int displayId = readDisplayId(displayPrefKey);
                     bundle.putInt(Config.DISPLAY_BUNDLE_KEY, displayId);
 
                     XposedBridge.log(TAG + ": set " + Config.DISPLAY_BUNDLE_KEY + "=" + displayId
@@ -132,20 +150,24 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 }
 
                 String settingKey = intent.getStringExtra(Config.EXTRA_SETTING_KEY);
-                String function = intent.getStringExtra(Config.EXTRA_FUNCTION);
-                if (!isAllowedSetting(settingKey) || !isAllowedFunction(function)) {
+                String requestedAction = intent.getStringExtra(Config.EXTRA_FUNCTION);
+                if (!isAllowedSetting(settingKey) || !isAllowedFunction(requestedAction)) {
                     XposedBridge.log(TAG + ": rejected invalid control request");
                     return;
                 }
+
+                String nativeFunction = Config.FUNCTION_NONE.equals(requestedAction)
+                        ? Config.FUNCTION_NONE
+                        : Config.FUNCTION_PAYMENT;
 
                 try {
                     boolean ok = Settings.System.putString(
                             receiverContext.getContentResolver(),
                             settingKey,
-                            function
+                            nativeFunction
                     );
-                    XposedBridge.log(TAG + ": system_server write " + settingKey + "=" + function
-                            + " result=" + ok);
+                    XposedBridge.log(TAG + ": system_server write " + settingKey + "=" + nativeFunction
+                            + " (requested=" + requestedAction + ") result=" + ok);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + ": system_server gesture write failed");
                     XposedBridge.log(t);
@@ -185,6 +207,26 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 || Config.FUNCTION_BUS.equals(function);
     }
 
+    private String readAction(String prefKey, String fallback) {
+        String action = fallback;
+        try {
+            XSharedPreferences prefs = preferences;
+            if (prefs != null) {
+                prefs.reload();
+                String stored = prefs.getString(prefKey, fallback);
+                if (Config.FUNCTION_PAYMENT.equals(stored)
+                        || Config.FUNCTION_BUS.equals(stored)
+                        || Config.FUNCTION_NONE.equals(stored)) {
+                    action = stored;
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": action preference reload failed, using native action fallback");
+            XposedBridge.log(t);
+        }
+        return action;
+    }
+
     private int readDisplayId(String prefKey) {
         String display = Config.DISPLAY_REAR;
         try {
@@ -194,7 +236,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 display = prefs.getString(prefKey, Config.DISPLAY_REAR);
             }
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": preference reload failed, using rear display fallback");
+            XposedBridge.log(TAG + ": display preference reload failed, using rear display fallback");
             XposedBridge.log(t);
         }
         return Config.DISPLAY_MAIN.equals(display) ? Config.DISPLAY_ID_MAIN : Config.DISPLAY_ID_REAR;

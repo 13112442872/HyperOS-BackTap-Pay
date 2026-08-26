@@ -97,6 +97,7 @@ public final class MainActivity extends Activity {
         doubleTapViews = buildGestureCard(
                 "背部双击",
                 Config.SETTING_BACK_DOUBLE,
+                Config.PREF_DOUBLE_ACTION,
                 Config.PREF_DOUBLE_DISPLAY
         );
         root.addView(doubleTapViews.card, cardSpacing());
@@ -104,12 +105,13 @@ public final class MainActivity extends Activity {
         tripleTapViews = buildGestureCard(
                 "背部三击",
                 Config.SETTING_BACK_TRIPLE,
+                Config.PREF_TRIPLE_ACTION,
                 Config.PREF_TRIPLE_DISPLAY
         );
         root.addView(tripleTapViews.card, cardSpacing());
 
         TextView footer = text(
-                "模块不需要 Root，也不需要“修改系统设置”权限。功能切换由已加载到系统框架的 LSPosed Hook 完成；普通配置会自动保存并即时生效。",
+                "付款码与乘车码都使用 HyperOS 原生“付款码”作为系统触发入口；模块在触发时按配置切换实际功能，因此乘车码配置可跨重启保留。无需 Root。",
                 13,
                 COLOR_SUBTEXT,
                 false
@@ -142,9 +144,15 @@ public final class MainActivity extends Activity {
         return card;
     }
 
-    private GestureViews buildGestureCard(String title, String settingKey, String displayPrefKey) {
+    private GestureViews buildGestureCard(
+            String title,
+            String settingKey,
+            String actionPrefKey,
+            String displayPrefKey
+    ) {
         GestureViews views = new GestureViews();
         views.settingKey = settingKey;
+        views.actionPrefKey = actionPrefKey;
         views.displayPrefKey = displayPrefKey;
         views.card = card();
         views.card.addView(sectionTitle(title));
@@ -166,9 +174,9 @@ public final class MainActivity extends Activity {
         groupLp.topMargin = dp(4);
         views.card.addView(views.actionGroup, groupLp);
 
-        views.unknownActionText = text("", 12, COLOR_SUBTEXT, false);
-        views.unknownActionText.setVisibility(View.GONE);
-        views.card.addView(views.unknownActionText);
+        views.warningText = text("", 12, COLOR_SUBTEXT, false);
+        views.warningText.setVisibility(View.GONE);
+        views.card.addView(views.warningText);
 
         TextView displayLabel = text("显示位置", 14, COLOR_SUBTEXT, false);
         LinearLayout.LayoutParams displayLabelLp = wrap();
@@ -189,11 +197,10 @@ public final class MainActivity extends Activity {
             if (loadingUi || checkedId == -1) {
                 return;
             }
-            String function = functionForId(views, checkedId);
-            if (function == null) {
-                return;
+            String action = actionForId(views, checkedId);
+            if (action != null) {
+                requestGestureChange(views, action);
             }
-            requestGestureChange(views, function);
         });
 
         views.displayGroup.setOnCheckedChangeListener((group, checkedId) -> {
@@ -213,9 +220,22 @@ public final class MainActivity extends Activity {
         return views;
     }
 
-    private void requestGestureChange(GestureViews views, String function) {
+    private void requestGestureChange(GestureViews views, String action) {
         if (!isCurrentHookLoaded()) {
             toast("当前新版 Hook 尚未加载，请确认 LSPosed 作用域后重启手机一次");
+            refreshGesture(views);
+            return;
+        }
+        if (!sharedPreferencesReady) {
+            toast("LSPosed 共享配置未就绪");
+            refreshGesture(views);
+            return;
+        }
+
+        String currentSystem = Settings.System.getString(getContentResolver(), views.settingKey);
+        String previousAction = readConfiguredAction(views, currentSystem, false);
+        if (!preferences.edit().putString(views.actionPrefKey, action).commit()) {
+            toast("保存功能配置失败");
             refreshGesture(views);
             return;
         }
@@ -223,27 +243,30 @@ public final class MainActivity extends Activity {
         try {
             Intent intent = new Intent(Config.ACTION_SET_GESTURE);
             intent.putExtra(Config.EXTRA_SETTING_KEY, views.settingKey);
-            intent.putExtra(Config.EXTRA_FUNCTION, function);
+            intent.putExtra(Config.EXTRA_FUNCTION, action);
             sendBroadcast(intent);
         } catch (Throwable t) {
+            preferences.edit().putString(views.actionPrefKey, previousAction).commit();
             toast("发送系统框架配置请求失败");
             refreshGesture(views);
             return;
         }
 
+        String expectedNative = nativeFunctionForAction(action);
         mainHandler.postDelayed(() -> {
             try {
                 String actual = Settings.System.getString(getContentResolver(), views.settingKey);
-                if (function.equals(actual)) {
+                if (expectedNative.equals(actual)) {
                     toast("配置已生效");
                 } else {
+                    preferences.edit().putString(views.actionPrefKey, previousAction).commit();
                     toast("配置未写入，请查看 LSPosed 日志");
                 }
             } catch (Throwable t) {
                 toast("无法验证系统手势配置");
             }
             refreshGesture(views);
-        }, 350);
+        }, 450);
     }
 
     private void refreshAll() {
@@ -313,25 +336,31 @@ public final class MainActivity extends Activity {
     private void refreshGesture(GestureViews views) {
         loadingUi = true;
         try {
-            String currentFunction = Settings.System.getString(getContentResolver(), views.settingKey);
-            views.actionGroup.clearCheck();
-            views.unknownActionText.setVisibility(View.GONE);
+            String currentSystem = Settings.System.getString(getContentResolver(), views.settingKey);
+            String action = readConfiguredAction(views, currentSystem, true);
 
-            boolean supportedAction = false;
-            if (Config.FUNCTION_PAYMENT.equals(currentFunction)) {
-                views.actionGroup.check(views.paymentId);
-                supportedAction = true;
-            } else if (Config.FUNCTION_BUS.equals(currentFunction)) {
+            views.actionGroup.clearCheck();
+            views.warningText.setVisibility(View.GONE);
+
+            if (Config.FUNCTION_BUS.equals(action)) {
                 views.actionGroup.check(views.busId);
-                supportedAction = true;
-            } else if (currentFunction == null || Config.FUNCTION_NONE.equals(currentFunction)) {
-                views.actionGroup.check(views.offId);
+            } else if (Config.FUNCTION_PAYMENT.equals(action)) {
+                views.actionGroup.check(views.paymentId);
             } else {
-                views.unknownActionText.setText(
-                        "当前系统绑定为其他功能：" + currentFunction
-                                + "。选择上方任一项后本模块才会接管。"
+                views.actionGroup.check(views.offId);
+            }
+
+            String expectedNative = nativeFunctionForAction(action);
+            boolean legacyBusActive = Config.FUNCTION_BUS.equals(action)
+                    && Config.FUNCTION_BUS.equals(currentSystem);
+            boolean nativeActive = expectedNative.equals(currentSystem) || legacyBusActive;
+
+            if (!nativeActive) {
+                String shown = currentSystem == null ? Config.FUNCTION_NONE : currentSystem;
+                views.warningText.setText(
+                        "系统当前绑定：" + shown + "。重新选择当前功能即可恢复模块绑定。"
                 );
-                views.unknownActionText.setVisibility(View.VISIBLE);
+                views.warningText.setVisibility(View.VISIBLE);
             }
 
             String display = preferences.getString(views.displayPrefKey, Config.DISPLAY_REAR);
@@ -340,13 +369,48 @@ public final class MainActivity extends Activity {
             } else {
                 views.displayGroup.check(views.rearId);
             }
-            setDisplayGroupEnabled(views.displayGroup, supportedAction);
+
+            boolean actionEnabled = !Config.FUNCTION_NONE.equals(action) && nativeActive;
+            setDisplayGroupEnabled(views.displayGroup, actionEnabled);
         } finally {
             loadingUi = false;
         }
     }
 
-    private static String functionForId(GestureViews views, int id) {
+    private String readConfiguredAction(GestureViews views, String currentSystem, boolean migrate) {
+        String action = preferences.getString(views.actionPrefKey, null);
+        if (isValidAction(action)) {
+            return action;
+        }
+
+        String inferred;
+        if (Config.FUNCTION_BUS.equals(currentSystem)) {
+            inferred = Config.FUNCTION_BUS;
+        } else if (Config.FUNCTION_PAYMENT.equals(currentSystem)) {
+            inferred = Config.FUNCTION_PAYMENT;
+        } else {
+            inferred = Config.FUNCTION_NONE;
+        }
+
+        if (migrate && sharedPreferencesReady) {
+            preferences.edit().putString(views.actionPrefKey, inferred).commit();
+        }
+        return inferred;
+    }
+
+    private static boolean isValidAction(String action) {
+        return Config.FUNCTION_NONE.equals(action)
+                || Config.FUNCTION_PAYMENT.equals(action)
+                || Config.FUNCTION_BUS.equals(action);
+    }
+
+    private static String nativeFunctionForAction(String action) {
+        return Config.FUNCTION_NONE.equals(action)
+                ? Config.FUNCTION_NONE
+                : Config.FUNCTION_PAYMENT;
+    }
+
+    private static String actionForId(GestureViews views, int id) {
         if (id == views.offId) return Config.FUNCTION_NONE;
         if (id == views.paymentId) return Config.FUNCTION_PAYMENT;
         if (id == views.busId) return Config.FUNCTION_BUS;
@@ -443,8 +507,9 @@ public final class MainActivity extends Activity {
         LinearLayout card;
         RadioGroup actionGroup;
         RadioGroup displayGroup;
-        TextView unknownActionText;
+        TextView warningText;
         String settingKey;
+        String actionPrefKey;
         String displayPrefKey;
         int offId;
         int paymentId;
