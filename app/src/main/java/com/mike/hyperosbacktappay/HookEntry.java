@@ -9,6 +9,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.widget.Toast;
 
@@ -26,12 +27,16 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final String SYSTEM_PACKAGE = "android";
     private static final String TARGET_CLASS = "com.miui.server.input.util.ShortCutActionsUtils";
     private static final String TARGET_METHOD = "triggerFunction";
+    private static final long TIP_DEDUP_WINDOW_MS = 800L;
 
+    private final Object tipDedupLock = new Object();
     private volatile XSharedPreferences preferences;
     private volatile boolean statusPublished;
     private volatile boolean controlReceiverRegistered;
     private volatile Context systemContext;
     private volatile Handler systemMainHandler;
+    private String lastTipKey;
+    private long lastTipUptime;
     private BroadcastReceiver controlReceiver;
 
     @Override
@@ -126,7 +131,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         }
                     }
 
-                    if (function == null || shortcut == null) {
+                    if (function == null || shortcut == null || !shouldShowTip(shortcut, function)) {
                         return;
                     }
 
@@ -290,6 +295,20 @@ public final class HookEntry implements IXposedHookLoadPackage {
             XposedBridge.log(t);
         }
         return false;
+    }
+
+    private boolean shouldShowTip(String shortcut, String function) {
+        String key = shortcut + "|" + function;
+        long now = SystemClock.uptimeMillis();
+        synchronized (tipDedupLock) {
+            if (key.equals(lastTipKey) && now - lastTipUptime < TIP_DEDUP_WINDOW_MS) {
+                XposedBridge.log(TAG + ": suppressed duplicate Tips for " + shortcut + " -> " + function);
+                return false;
+            }
+            lastTipKey = key;
+            lastTipUptime = now;
+            return true;
+        }
     }
 
     private void showTriggerTip(String shortcut, String function, String resultSuffix) {
