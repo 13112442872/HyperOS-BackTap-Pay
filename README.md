@@ -6,6 +6,7 @@
 
 - 背部双击 / 三击可分别配置：关闭、支付宝付款码、支付宝乘车码。
 - 双击和三击可分别选择主屏 / 背屏显示。
+- 可选开启 **触发 Tips**：每次背部双击 / 三击触发后，在主屏显示敲击次数和实际功能，方便不用翻到背屏确认。
 - 配置自动保存，普通配置修改后即时生效。
 - LSPosed 推荐作用域：**系统框架 / System Framework**。
 - 不需要 Root，也不需要“修改系统设置”权限。
@@ -25,16 +26,28 @@ back_double_tap / back_triple_tap = launch_alipay_payment_code
 ```text
 double_action / triple_action = launch_alipay_payment_code / launch_alipay_bus_code / none
 double_display / triple_display = main / rear
+show_tips = true / false
 ```
 
 触发背部轻敲时，Hook 会按模块配置把本次 `triggerFunction` 的付款码动作动态改为乘车码，并继续写入 `show_code_display=0/1`。因此系统设置始终保留合法值，乘车码选择也能跨重启保持。
+
+## 触发 Tips
+
+从 v0.2.3 起，可在 App 中开启“显示 Tips”。启用后，Hook 在 `triggerFunction` 执行完成后通过主屏 Toast 显示本次敲击次数和实际功能，例如：
+
+```text
+背部双击 · 支付宝乘车码 ✓
+背部三击 · 支付宝付款码 ✓
+```
+
+开关通过 XSharedPreferences 即时读取，修改后无需重启。
 
 ## 使用
 
 1. 安装 GitHub Release 中的 APK。
 2. 在 LSPosed 中启用模块，作用域选择 **系统框架 / System Framework**。
 3. 首次启用模块或更新了 Hook 代码后，重启手机一次。
-4. 打开模块 App，配置双击 / 三击的功能与显示位置。
+4. 打开模块 App，配置双击 / 三击的功能、显示位置和触发 Tips。
 
 ## Hook 状态
 
