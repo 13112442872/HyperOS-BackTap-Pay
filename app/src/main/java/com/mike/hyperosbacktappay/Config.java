@@ -10,6 +10,7 @@ public final class Config {
     public static final String PREF_TRIPLE_ACTION = "triple_action";
     public static final String PREF_DOUBLE_DISPLAY = "double_display";
     public static final String PREF_TRIPLE_DISPLAY = "triple_display";
+    public static final String PREF_SHOW_TIPS = "show_tips";
 
     public static final String ACTION_NONE = "none";
     public static final String ACTION_PAYMENT = "payment";
