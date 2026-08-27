@@ -7,7 +7,10 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
+import android.widget.Toast;
 
 import java.lang.reflect.Method;
 
@@ -27,6 +30,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private volatile XSharedPreferences preferences;
     private volatile boolean statusPublished;
     private volatile boolean controlReceiverRegistered;
+    private volatile Context systemContext;
+    private volatile Handler systemMainHandler;
     private BroadcastReceiver controlReceiver;
 
     @Override
@@ -103,6 +108,35 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     XposedBridge.log(TAG + ": set " + Config.DISPLAY_BUNDLE_KEY + "=" + displayId
                             + " for " + shortcut + " -> " + function);
                 }
+
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!readShowTips()) {
+                        return;
+                    }
+
+                    String function = null;
+                    String shortcut = null;
+                    for (Object arg : param.args) {
+                        if (Config.FUNCTION_PAYMENT.equals(arg) || Config.FUNCTION_BUS.equals(arg)) {
+                            function = (String) arg;
+                        } else if (Config.SETTING_BACK_DOUBLE.equals(arg)
+                                || Config.SETTING_BACK_TRIPLE.equals(arg)) {
+                            shortcut = (String) arg;
+                        }
+                    }
+
+                    if (function == null || shortcut == null) {
+                        return;
+                    }
+
+                    String resultSuffix = "";
+                    Object result = param.getResult();
+                    if (result instanceof Boolean) {
+                        resultSuffix = ((Boolean) result) ? " ✓" : " · 触发失败";
+                    }
+                    showTriggerTip(shortcut, function, resultSuffix);
+                }
             });
 
             XposedBridge.log(TAG + ": hooked " + TARGET_CLASS + "#" + TARGET_METHOD);
@@ -122,6 +156,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         Object value = XposedHelpers.getObjectField(param.thisObject, "mSystemContext");
                         if (value instanceof Context) {
                             Context context = (Context) value;
+                            rememberSystemContext(context);
                             registerControlReceiver(context);
                             publishHookStatus(context);
                         }
@@ -142,6 +177,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return;
         }
 
+        rememberSystemContext(context);
         controlReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context receiverContext, Intent intent) {
@@ -242,6 +278,68 @@ public final class HookEntry implements IXposedHookLoadPackage {
         return Config.DISPLAY_MAIN.equals(display) ? Config.DISPLAY_ID_MAIN : Config.DISPLAY_ID_REAR;
     }
 
+    private boolean readShowTips() {
+        try {
+            XSharedPreferences prefs = preferences;
+            if (prefs != null) {
+                prefs.reload();
+                return prefs.getBoolean(Config.PREF_SHOW_TIPS, false);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": Tips preference reload failed");
+            XposedBridge.log(t);
+        }
+        return false;
+    }
+
+    private void showTriggerTip(String shortcut, String function, String resultSuffix) {
+        Context context = systemContext;
+        if (context == null) {
+            return;
+        }
+
+        String tapText = Config.SETTING_BACK_TRIPLE.equals(shortcut) ? "背部三击" : "背部双击";
+        String functionText = Config.FUNCTION_BUS.equals(function) ? "支付宝乘车码" : "支付宝付款码";
+        String message = tapText + " · " + functionText + resultSuffix;
+
+        try {
+            Handler handler = systemMainHandler;
+            if (handler == null) {
+                synchronized (this) {
+                    handler = systemMainHandler;
+                    if (handler == null && Looper.getMainLooper() != null) {
+                        handler = new Handler(Looper.getMainLooper());
+                        systemMainHandler = handler;
+                    }
+                }
+            }
+            if (handler != null) {
+                Handler finalHandler = handler;
+                finalHandler.post(() -> {
+                    try {
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + ": unable to show trigger Tips");
+                        XposedBridge.log(t);
+                    }
+                });
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": trigger Tips failed");
+            XposedBridge.log(t);
+        }
+    }
+
+    private void rememberSystemContext(Context context) {
+        if (context == null) {
+            return;
+        }
+        systemContext = context;
+        if (systemMainHandler == null && Looper.getMainLooper() != null) {
+            systemMainHandler = new Handler(Looper.getMainLooper());
+        }
+    }
+
     private void publishStatusFromShortcutObject(Object object) {
         if (statusPublished || object == null) {
             return;
@@ -253,6 +351,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 Object value = XposedHelpers.getObjectField(object, fieldName);
                 if (value instanceof Context) {
                     Context context = (Context) value;
+                    rememberSystemContext(context);
                     registerControlReceiver(context);
                     publishHookStatus(context);
                     return;
@@ -267,6 +366,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         if (context == null) {
             return;
         }
+        rememberSystemContext(context);
         try {
             ContentResolver resolver = context.getContentResolver();
             int bootCount = Settings.Global.getInt(resolver, Settings.Global.BOOT_COUNT, -1);
