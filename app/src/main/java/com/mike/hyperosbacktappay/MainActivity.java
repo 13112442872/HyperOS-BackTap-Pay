@@ -18,6 +18,7 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -35,6 +36,7 @@ public final class MainActivity extends Activity {
     private boolean loadingUi;
 
     private TextView hookStatusText;
+    private Switch tipsSwitch;
     private GestureViews doubleTapViews;
     private GestureViews tripleTapViews;
 
@@ -93,6 +95,7 @@ public final class MainActivity extends Activity {
         root.addView(subtitle, subtitleLp);
 
         root.addView(buildStatusCard());
+        root.addView(buildTipsCard(), cardSpacing());
 
         doubleTapViews = buildGestureCard(
                 "背部双击",
@@ -141,6 +144,51 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams scopeLp = wrap();
         scopeLp.topMargin = dp(8);
         card.addView(scope, scopeLp);
+        return card;
+    }
+
+    @SuppressWarnings("deprecation")
+    private View buildTipsCard() {
+        LinearLayout card = card();
+        card.addView(sectionTitle("触发 Tips"));
+
+        tipsSwitch = new Switch(this);
+        tipsSwitch.setText("显示 Tips");
+        tipsSwitch.setTextSize(15);
+        tipsSwitch.setTextColor(COLOR_TEXT);
+        tipsSwitch.setChecked(preferences.getBoolean(Config.PREF_SHOW_TIPS, false));
+        LinearLayout.LayoutParams switchLp = matchWrap();
+        switchLp.topMargin = dp(10);
+        card.addView(tipsSwitch, switchLp);
+
+        TextView description = text(
+                "开启后，背部双击 / 三击触发完成时会在主屏显示敲击次数和实际功能，方便不用翻到背屏确认。",
+                13,
+                COLOR_SUBTEXT,
+                false
+        );
+        LinearLayout.LayoutParams descLp = wrap();
+        descLp.topMargin = dp(6);
+        card.addView(description, descLp);
+
+        tipsSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (loadingUi) {
+                return;
+            }
+            if (!sharedPreferencesReady) {
+                toast("LSPosed 共享配置未就绪，请确认模块已启用后重新打开应用");
+                refreshTips();
+                return;
+            }
+            boolean ok = preferences.edit().putBoolean(Config.PREF_SHOW_TIPS, isChecked).commit();
+            if (ok) {
+                toast(isChecked ? "Tips 已开启" : "Tips 已关闭");
+            } else {
+                toast("保存 Tips 设置失败");
+                refreshTips();
+            }
+        });
+
         return card;
     }
 
@@ -271,11 +319,24 @@ public final class MainActivity extends Activity {
 
     private void refreshAll() {
         refreshHookStatus();
+        refreshTips();
         if (doubleTapViews != null) {
             refreshGesture(doubleTapViews);
         }
         if (tripleTapViews != null) {
             refreshGesture(tripleTapViews);
+        }
+    }
+
+    private void refreshTips() {
+        if (tipsSwitch == null) {
+            return;
+        }
+        loadingUi = true;
+        try {
+            tipsSwitch.setChecked(preferences.getBoolean(Config.PREF_SHOW_TIPS, false));
+        } finally {
+            loadingUi = false;
         }
     }
 
