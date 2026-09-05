@@ -1,14 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <permission
-        android:name="com.mike.hyperosbacktappay.permission.CONTROL_BACKTAP"
-        android:protectionLevel="signature" />
-
-    <uses-permission android:name="com.mike.hyperosbacktappay.permission.CONTROL_BACKTAP" />
-
     <application
+        android:name=".ModuleApp"
         android:allowBackup="false"
+        android:description="配置澎湃OS背部双击/三击支付宝付款码或乘车码，并选择主屏/背屏显示"
         android:label="HyperOS BackTap Pay"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
@@ -21,21 +17,5 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="配置澎湃OS背部双击/三击支付宝付款码或乘车码，并选择主屏/背屏显示" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="82" />
-        <meta-data
-            android:name="xposedscope"
-            android:value="android" />
-        <meta-data
-            android:name="xposedsharedprefs"
-            android:value="true" />
     </application>
 </manifest>
