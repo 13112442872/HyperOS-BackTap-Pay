@@ -1,300 +1,303 @@
 package com.mike.hyperosbacktappay;
 
-import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.os.Build;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.Log;
 import android.widget.Toast;
 
+import java.lang.reflect.Executable;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.List;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XSharedPreferences;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedModule;
 
-public final class HookEntry implements IXposedHookLoadPackage {
+public final class HookEntry extends XposedModule {
     private static final String TAG = "HyperOSBackTapPay";
-    private static final String SYSTEM_PACKAGE = "android";
     private static final String TARGET_CLASS = "com.miui.server.input.util.ShortCutActionsUtils";
     private static final String TARGET_METHOD = "triggerFunction";
+    private static final String HOOK_ID_PREFIX = "hyperos-backtap-pay:trigger:";
     private static final long TIP_DEDUP_WINDOW_MS = 800L;
 
     private final Object tipDedupLock = new Object();
-    private volatile XSharedPreferences preferences;
-    private volatile boolean statusPublished;
-    private volatile boolean controlReceiverRegistered;
+    private final ThreadLocal<Integer> triggerDepth = ThreadLocal.withInitial(() -> 0);
+
+    private volatile SharedPreferences preferences;
+    private volatile SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
     private volatile Context systemContext;
     private volatile Handler systemMainHandler;
     private String lastTipKey;
     private long lastTipUptime;
-    private BroadcastReceiver controlReceiver;
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        if (!SYSTEM_PACKAGE.equals(lpparam.packageName)) {
-            return;
-        }
-
-        preferences = new XSharedPreferences(Config.MODULE_PACKAGE, Config.PREFS_NAME);
-        hookShortcutActions(lpparam.classLoader);
-        hookSystemStatus(lpparam.classLoader);
+    public void onModuleLoaded(ModuleLoadedParam param) {
+        log(Log.INFO, TAG, "Modern module loaded in " + param.getProcessName()
+                + ", API=" + getApiVersion() + ", framework=" + getFrameworkName()
+                + " " + getFrameworkVersion());
     }
 
-    private void hookShortcutActions(ClassLoader classLoader) {
+    @Override
+    public void onSystemServerStarting(SystemServerStartingParam param) {
         try {
-            Class<?> clazz = XposedHelpers.findClass(TARGET_CLASS, classLoader);
-            XposedBridge.hookAllMethods(clazz, TARGET_METHOD, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    int functionIndex = -1;
-                    String function = null;
-                    String shortcut = null;
-
-                    for (int i = 0; i < param.args.length; i++) {
-                        Object arg = param.args[i];
-                        if (Config.FUNCTION_PAYMENT.equals(arg) || Config.FUNCTION_BUS.equals(arg)) {
-                            functionIndex = i;
-                            function = (String) arg;
-                        } else if (Config.SETTING_BACK_DOUBLE.equals(arg)
-                                || Config.SETTING_BACK_TRIPLE.equals(arg)) {
-                            shortcut = (String) arg;
-                        }
-                    }
-
-                    if (functionIndex < 0 || function == null || shortcut == null) {
-                        return;
-                    }
-
-                    publishStatusFromShortcutObject(param.thisObject);
-
-                    String actionPrefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
-                            ? Config.PREF_TRIPLE_ACTION
-                            : Config.PREF_DOUBLE_ACTION;
-                    String displayPrefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
-                            ? Config.PREF_TRIPLE_DISPLAY
-                            : Config.PREF_DOUBLE_DISPLAY;
-
-                    String configuredAction = readAction(actionPrefKey, function);
-                    if (Config.FUNCTION_PAYMENT.equals(configuredAction)
-                            || Config.FUNCTION_BUS.equals(configuredAction)) {
-                        if (!configuredAction.equals(function)) {
-                            param.args[functionIndex] = configuredAction;
-                            XposedBridge.log(TAG + ": remapped " + shortcut + " action "
-                                    + function + " -> " + configuredAction);
-                        }
-                        function = configuredAction;
-                    }
-
-                    int bundleIndex = findBundleArgument(param);
-                    if (bundleIndex < 0) {
-                        XposedBridge.log(TAG + ": matched BackTap Alipay action, but no Bundle parameter was found");
-                        return;
-                    }
-
-                    Bundle bundle = (Bundle) param.args[bundleIndex];
-                    if (bundle == null) {
-                        bundle = new Bundle();
-                        param.args[bundleIndex] = bundle;
-                    }
-
-                    int displayId = readDisplayId(displayPrefKey);
-                    bundle.putInt(Config.DISPLAY_BUNDLE_KEY, displayId);
-
-                    XposedBridge.log(TAG + ": set " + Config.DISPLAY_BUNDLE_KEY + "=" + displayId
-                            + " for " + shortcut + " -> " + function);
-                }
-
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (!readShowTips()) {
-                        return;
-                    }
-
-                    String function = null;
-                    String shortcut = null;
-                    for (Object arg : param.args) {
-                        if (Config.FUNCTION_PAYMENT.equals(arg) || Config.FUNCTION_BUS.equals(arg)) {
-                            function = (String) arg;
-                        } else if (Config.SETTING_BACK_DOUBLE.equals(arg)
-                                || Config.SETTING_BACK_TRIPLE.equals(arg)) {
-                            shortcut = (String) arg;
-                        }
-                    }
-
-                    if (function == null || shortcut == null || !shouldShowTip(shortcut, function)) {
-                        return;
-                    }
-
-                    String resultSuffix = "";
-                    Object result = param.getResult();
-                    if (result instanceof Boolean) {
-                        resultSuffix = ((Boolean) result) ? " ✓" : " · 触发失败";
-                    }
-                    showTriggerTip(shortcut, function, resultSuffix);
-                }
-            });
-
-            XposedBridge.log(TAG + ": hooked " + TARGET_CLASS + "#" + TARGET_METHOD);
+            initializeRemotePreferences();
+            rememberSystemContext(resolveSystemContext());
+            installTriggerHooks(param.getClassLoader());
+            syncAllNativeActions();
+            publishHookStatus();
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": shortcut hook failed");
-            XposedBridge.log(t);
+            log(Log.ERROR, TAG, "Failed to initialize system_server hooks", t);
         }
     }
 
-    private void hookSystemStatus(ClassLoader classLoader) {
+    @Override
+    public boolean onHotReloading(HotReloadingParam param) {
+        log(Log.INFO, TAG, "Preparing API 102 hot reload");
+        detachPreferenceListener();
+        preferences = null;
+        systemContext = null;
+        systemMainHandler = null;
+        lastTipKey = null;
+        lastTipUptime = 0L;
+        triggerDepth.remove();
+        return true;
+    }
+
+    @Override
+    public void onHotReloaded(HotReloadedParam param) {
+        log(Log.INFO, TAG, "Hot reloaded in " + param.getProcessName()
+                + ", old hooks=" + param.getOldHookHandles().size());
+
         try {
-            Class<?> systemServer = XposedHelpers.findClass("com.android.server.SystemServer", classLoader);
-            XposedBridge.hookAllMethods(systemServer, "startOtherServices", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    try {
-                        Object value = XposedHelpers.getObjectField(param.thisObject, "mSystemContext");
-                        if (value instanceof Context) {
-                            Context context = (Context) value;
-                            rememberSystemContext(context);
-                            registerControlReceiver(context);
-                            publishHookStatus(context);
-                        }
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ": unable to initialize system-server bridge");
-                        XposedBridge.log(t);
+            initializeRemotePreferences();
+            rememberSystemContext(resolveSystemContext());
+
+            ClassLoader targetClassLoader = null;
+            boolean replacedAny = false;
+            for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
+                String id = oldHandle.getId();
+                if (id != null && id.startsWith(HOOK_ID_PREFIX)) {
+                    if (targetClassLoader == null) {
+                        targetClassLoader = oldHandle.getExecutable().getDeclaringClass().getClassLoader();
                     }
-                }
-            });
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": status hook unavailable; status will be published on first shortcut trigger");
-            XposedBridge.log(t);
-        }
-    }
-
-    private synchronized void registerControlReceiver(Context context) {
-        if (controlReceiverRegistered || context == null) {
-            return;
-        }
-
-        rememberSystemContext(context);
-        controlReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context receiverContext, Intent intent) {
-                if (intent == null || !Config.ACTION_SET_GESTURE.equals(intent.getAction())) {
-                    return;
-                }
-
-                String settingKey = intent.getStringExtra(Config.EXTRA_SETTING_KEY);
-                String requestedAction = intent.getStringExtra(Config.EXTRA_FUNCTION);
-                if (!isAllowedSetting(settingKey) || !isAllowedFunction(requestedAction)) {
-                    XposedBridge.log(TAG + ": rejected invalid control request");
-                    return;
-                }
-
-                String nativeFunction = Config.FUNCTION_NONE.equals(requestedAction)
-                        ? Config.FUNCTION_NONE
-                        : Config.FUNCTION_PAYMENT;
-
-                try {
-                    boolean ok = Settings.System.putString(
-                            receiverContext.getContentResolver(),
-                            settingKey,
-                            nativeFunction
-                    );
-                    XposedBridge.log(TAG + ": system_server write " + settingKey + "=" + nativeFunction
-                            + " (requested=" + requestedAction + ") result=" + ok);
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + ": system_server gesture write failed");
-                    XposedBridge.log(t);
+                    oldHandle.replaceHook(this::interceptTrigger);
+                    replacedAny = true;
+                } else {
+                    oldHandle.unhook();
                 }
             }
-        };
 
-        IntentFilter filter = new IntentFilter(Config.ACTION_SET_GESTURE);
-        if (Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(
-                    controlReceiver,
-                    filter,
-                    Config.CONTROL_PERMISSION,
-                    null,
-                    Context.RECEIVER_EXPORTED
-            );
-        } else {
-            context.registerReceiver(
-                    controlReceiver,
-                    filter,
-                    Config.CONTROL_PERMISSION,
-                    null
-            );
+            if (!replacedAny && targetClassLoader != null) {
+                installTriggerHooks(targetClassLoader);
+            }
+
+            syncAllNativeActions();
+            publishHookStatus();
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Hot reload initialization failed", t);
         }
-        controlReceiverRegistered = true;
-        XposedBridge.log(TAG + ": system-server control receiver registered");
     }
 
-    private static boolean isAllowedSetting(String settingKey) {
-        return Config.SETTING_BACK_DOUBLE.equals(settingKey)
-                || Config.SETTING_BACK_TRIPLE.equals(settingKey);
+    private void installTriggerHooks(ClassLoader classLoader) throws Exception {
+        Class<?> clazz = Class.forName(TARGET_CLASS, false, classLoader);
+        int count = 0;
+        for (Method method : clazz.getDeclaredMethods()) {
+            if (!TARGET_METHOD.equals(method.getName())) {
+                continue;
+            }
+            method.setAccessible(true);
+            hook(method)
+                    .setId(hookId(method))
+                    .intercept(this::interceptTrigger);
+            count++;
+        }
+        log(Log.INFO, TAG, "Installed " + count + " modern triggerFunction hook(s)");
     }
 
-    private static boolean isAllowedFunction(String function) {
-        return Config.FUNCTION_NONE.equals(function)
-                || Config.FUNCTION_PAYMENT.equals(function)
-                || Config.FUNCTION_BUS.equals(function);
+    private Object interceptTrigger(XposedInterface.Chain chain) throws Throwable {
+        int depth = triggerDepth.get();
+        triggerDepth.set(depth + 1);
+
+        try {
+            List<Object> originalArgs = chain.getArgs();
+            Object[] args = originalArgs.toArray(new Object[0]);
+
+            int functionIndex = -1;
+            String function = null;
+            String shortcut = null;
+            for (int i = 0; i < args.length; i++) {
+                Object arg = args[i];
+                if (Config.FUNCTION_PAYMENT.equals(arg) || Config.FUNCTION_BUS.equals(arg)) {
+                    functionIndex = i;
+                    function = (String) arg;
+                } else if (Config.SETTING_BACK_DOUBLE.equals(arg)
+                        || Config.SETTING_BACK_TRIPLE.equals(arg)) {
+                    shortcut = (String) arg;
+                }
+            }
+
+            if (functionIndex < 0 || function == null || shortcut == null) {
+                return chain.proceed();
+            }
+
+            rememberSystemContext(extractContext(chain.getThisObject()));
+
+            String actionPrefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
+                    ? Config.PREF_TRIPLE_ACTION
+                    : Config.PREF_DOUBLE_ACTION;
+            String displayPrefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
+                    ? Config.PREF_TRIPLE_DISPLAY
+                    : Config.PREF_DOUBLE_DISPLAY;
+
+            String configuredAction = readAction(actionPrefKey, function);
+            if (Config.FUNCTION_PAYMENT.equals(configuredAction)
+                    || Config.FUNCTION_BUS.equals(configuredAction)) {
+                if (!configuredAction.equals(function)) {
+                    args[functionIndex] = configuredAction;
+                    log(Log.DEBUG, TAG, "Remapped " + shortcut + " " + function
+                            + " -> " + configuredAction);
+                }
+                function = configuredAction;
+            }
+
+            int bundleIndex = findBundleArgument(chain.getExecutable(), args);
+            if (bundleIndex >= 0) {
+                Bundle bundle = args[bundleIndex] instanceof Bundle
+                        ? (Bundle) args[bundleIndex]
+                        : new Bundle();
+                args[bundleIndex] = bundle;
+                int displayId = readDisplayId(displayPrefKey);
+                bundle.putInt(Config.DISPLAY_BUNDLE_KEY, displayId);
+                log(Log.DEBUG, TAG, "Set " + Config.DISPLAY_BUNDLE_KEY + "=" + displayId
+                        + " for " + shortcut + " -> " + function);
+            } else {
+                log(Log.WARN, TAG, "Matched BackTap action but no Bundle argument was found");
+            }
+
+            Object result = chain.proceed(args);
+            if (depth == 0 && readShowTips() && shouldShowTip(shortcut, function)) {
+                String suffix = "";
+                if (result instanceof Boolean) {
+                    suffix = ((Boolean) result) ? " ✓" : " · 触发失败";
+                }
+                showTriggerTip(shortcut, function, suffix);
+            }
+            return result;
+        } finally {
+            if (depth == 0) {
+                triggerDepth.remove();
+            } else {
+                triggerDepth.set(depth);
+            }
+        }
+    }
+
+    private void initializeRemotePreferences() {
+        if (preferences != null) {
+            return;
+        }
+        SharedPreferences prefs = getRemotePreferences(Config.PREFS_NAME);
+        SharedPreferences.OnSharedPreferenceChangeListener listener = (sharedPreferences, key) -> {
+            if (Config.PREF_DOUBLE_ACTION.equals(key) || Config.PREF_TRIPLE_ACTION.equals(key)) {
+                syncNativeAction(key);
+            }
+        };
+        prefs.registerOnSharedPreferenceChangeListener(listener);
+        preferences = prefs;
+        preferenceListener = listener;
+        log(Log.INFO, TAG, "Remote Preferences connected");
+    }
+
+    private void detachPreferenceListener() {
+        SharedPreferences prefs = preferences;
+        SharedPreferences.OnSharedPreferenceChangeListener listener = preferenceListener;
+        if (prefs != null && listener != null) {
+            try {
+                prefs.unregisterOnSharedPreferenceChangeListener(listener);
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "Unable to unregister Remote Preferences listener", t);
+            }
+        }
+        preferenceListener = null;
+    }
+
+    private void syncAllNativeActions() {
+        syncNativeAction(Config.PREF_DOUBLE_ACTION);
+        syncNativeAction(Config.PREF_TRIPLE_ACTION);
+    }
+
+    private void syncNativeAction(String prefKey) {
+        SharedPreferences prefs = preferences;
+        if (prefs == null || !prefs.contains(prefKey)) {
+            return;
+        }
+
+        String action = prefs.getString(prefKey, Config.FUNCTION_NONE);
+        if (!isAllowedAction(action)) {
+            return;
+        }
+
+        String settingKey = Config.PREF_TRIPLE_ACTION.equals(prefKey)
+                ? Config.SETTING_BACK_TRIPLE
+                : Config.SETTING_BACK_DOUBLE;
+        String nativeFunction = Config.FUNCTION_NONE.equals(action)
+                ? Config.FUNCTION_NONE
+                : Config.FUNCTION_PAYMENT;
+
+        Context context = systemContext;
+        if (context == null) {
+            context = resolveSystemContext();
+            rememberSystemContext(context);
+        }
+        if (context == null) {
+            log(Log.WARN, TAG, "Cannot sync " + settingKey + ": system Context unavailable");
+            return;
+        }
+
+        try {
+            boolean ok = Settings.System.putString(
+                    context.getContentResolver(), settingKey, nativeFunction);
+            log(Log.INFO, TAG, "Synced " + settingKey + "=" + nativeFunction
+                    + " (configured=" + action + ") result=" + ok);
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Failed to sync native BackTap setting", t);
+        }
     }
 
     private String readAction(String prefKey, String fallback) {
-        String action = fallback;
-        try {
-            XSharedPreferences prefs = preferences;
-            if (prefs != null) {
-                prefs.reload();
-                String stored = prefs.getString(prefKey, fallback);
-                if (Config.FUNCTION_PAYMENT.equals(stored)
-                        || Config.FUNCTION_BUS.equals(stored)
-                        || Config.FUNCTION_NONE.equals(stored)) {
-                    action = stored;
-                }
-            }
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": action preference reload failed, using native action fallback");
-            XposedBridge.log(t);
+        SharedPreferences prefs = preferences;
+        if (prefs == null) {
+            return fallback;
         }
-        return action;
+        String stored = prefs.getString(prefKey, fallback);
+        return isAllowedAction(stored) ? stored : fallback;
     }
 
     private int readDisplayId(String prefKey) {
-        String display = Config.DISPLAY_REAR;
-        try {
-            XSharedPreferences prefs = preferences;
-            if (prefs != null) {
-                prefs.reload();
-                display = prefs.getString(prefKey, Config.DISPLAY_REAR);
-            }
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": display preference reload failed, using rear display fallback");
-            XposedBridge.log(t);
-        }
-        return Config.DISPLAY_MAIN.equals(display) ? Config.DISPLAY_ID_MAIN : Config.DISPLAY_ID_REAR;
+        SharedPreferences prefs = preferences;
+        String display = prefs == null
+                ? Config.DISPLAY_REAR
+                : prefs.getString(prefKey, Config.DISPLAY_REAR);
+        return Config.DISPLAY_MAIN.equals(display)
+                ? Config.DISPLAY_ID_MAIN
+                : Config.DISPLAY_ID_REAR;
     }
 
     private boolean readShowTips() {
-        try {
-            XSharedPreferences prefs = preferences;
-            if (prefs != null) {
-                prefs.reload();
-                return prefs.getBoolean(Config.PREF_SHOW_TIPS, false);
-            }
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Tips preference reload failed");
-            XposedBridge.log(t);
-        }
-        return false;
+        SharedPreferences prefs = preferences;
+        return prefs != null && prefs.getBoolean(Config.PREF_SHOW_TIPS, false);
+    }
+
+    private static boolean isAllowedAction(String action) {
+        return Config.FUNCTION_NONE.equals(action)
+                || Config.FUNCTION_PAYMENT.equals(action)
+                || Config.FUNCTION_BUS.equals(action);
     }
 
     private boolean shouldShowTip(String shortcut, String function) {
@@ -302,7 +305,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
         long now = SystemClock.uptimeMillis();
         synchronized (tipDedupLock) {
             if (key.equals(lastTipKey) && now - lastTipUptime < TIP_DEDUP_WINDOW_MS) {
-                XposedBridge.log(TAG + ": suppressed duplicate Tips for " + shortcut + " -> " + function);
                 return false;
             }
             lastTipKey = key;
@@ -321,31 +323,48 @@ public final class HookEntry implements IXposedHookLoadPackage {
         String functionText = Config.FUNCTION_BUS.equals(function) ? "支付宝乘车码" : "支付宝付款码";
         String message = tapText + " · " + functionText + resultSuffix;
 
-        try {
-            Handler handler = systemMainHandler;
-            if (handler == null) {
-                synchronized (this) {
-                    handler = systemMainHandler;
-                    if (handler == null && Looper.getMainLooper() != null) {
-                        handler = new Handler(Looper.getMainLooper());
-                        systemMainHandler = handler;
-                    }
+        Handler handler = systemMainHandler;
+        if (handler == null && Looper.getMainLooper() != null) {
+            synchronized (this) {
+                handler = systemMainHandler;
+                if (handler == null) {
+                    handler = new Handler(Looper.getMainLooper());
+                    systemMainHandler = handler;
                 }
             }
-            if (handler != null) {
-                Handler finalHandler = handler;
-                finalHandler.post(() -> {
-                    try {
-                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ": unable to show trigger Tips");
-                        XposedBridge.log(t);
-                    }
-                });
+        }
+        if (handler == null) {
+            return;
+        }
+
+        handler.post(() -> {
+            try {
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "Unable to show trigger Tips", t);
             }
+        });
+    }
+
+    private void publishHookStatus() {
+        Context context = systemContext;
+        if (context == null) {
+            context = resolveSystemContext();
+            rememberSystemContext(context);
+        }
+        if (context == null) {
+            log(Log.WARN, TAG, "Unable to publish Hook status: system Context unavailable");
+            return;
+        }
+
+        try {
+            ContentResolver resolver = context.getContentResolver();
+            int bootCount = Settings.Global.getInt(resolver, Settings.Global.BOOT_COUNT, -1);
+            Settings.System.putString(resolver, Config.STATUS_HOOK_VERSION, BuildConfig.VERSION_NAME);
+            Settings.System.putInt(resolver, Config.STATUS_HOOK_BOOT_COUNT, bootCount);
+            log(Log.INFO, TAG, "Published Modern Hook status version=" + BuildConfig.VERSION_NAME);
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": trigger Tips failed");
-            XposedBridge.log(t);
+            log(Log.ERROR, TAG, "Failed to publish Hook status", t);
         }
     }
 
@@ -359,73 +378,81 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
     }
 
-    private void publishStatusFromShortcutObject(Object object) {
-        if (statusPublished || object == null) {
-            return;
+    private Context resolveSystemContext() {
+        try {
+            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+            Method current = activityThreadClass.getDeclaredMethod("currentActivityThread");
+            current.setAccessible(true);
+            Object activityThread = current.invoke(null);
+            if (activityThread == null) {
+                return null;
+            }
+            Method getSystemContext = activityThreadClass.getDeclaredMethod("getSystemContext");
+            getSystemContext.setAccessible(true);
+            Object value = getSystemContext.invoke(activityThread);
+            return value instanceof Context ? (Context) value : null;
+        } catch (Throwable t) {
+            log(Log.DEBUG, TAG, "ActivityThread system Context not ready", t);
+            return null;
         }
+    }
 
-        String[] fieldNames = {"mContext", "mSystemContext"};
-        for (String fieldName : fieldNames) {
+    private Context extractContext(Object object) {
+        if (object == null) {
+            return null;
+        }
+        for (String fieldName : new String[]{"mContext", "mSystemContext"}) {
             try {
-                Object value = XposedHelpers.getObjectField(object, fieldName);
+                Field field = findField(object.getClass(), fieldName);
+                if (field == null) {
+                    continue;
+                }
+                field.setAccessible(true);
+                Object value = field.get(object);
                 if (value instanceof Context) {
-                    Context context = (Context) value;
-                    rememberSystemContext(context);
-                    registerControlReceiver(context);
-                    publishHookStatus(context);
-                    return;
+                    return (Context) value;
                 }
             } catch (Throwable ignored) {
-                // Try the next common field name.
+                // Try the next known field name.
             }
         }
+        return null;
     }
 
-    private void publishHookStatus(Context context) {
-        if (context == null) {
-            return;
-        }
-        rememberSystemContext(context);
-        try {
-            ContentResolver resolver = context.getContentResolver();
-            int bootCount = Settings.Global.getInt(resolver, Settings.Global.BOOT_COUNT, -1);
-            boolean versionOk = Settings.System.putString(
-                    resolver,
-                    Config.STATUS_HOOK_VERSION,
-                    BuildConfig.VERSION_NAME
-            );
-            boolean bootOk = Settings.System.putInt(
-                    resolver,
-                    Config.STATUS_HOOK_BOOT_COUNT,
-                    bootCount
-            );
-            statusPublished = versionOk && bootOk;
-            if (statusPublished) {
-                XposedBridge.log(TAG + ": published Hook status version=" + BuildConfig.VERSION_NAME
-                        + ", bootCount=" + bootCount);
+    private static Field findField(Class<?> clazz, String name) {
+        Class<?> current = clazz;
+        while (current != null) {
+            try {
+                return current.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+                current = current.getSuperclass();
             }
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": failed to publish Hook status");
-            XposedBridge.log(t);
         }
+        return null;
     }
 
-    private static int findBundleArgument(XC_MethodHook.MethodHookParam param) {
-        for (int i = 0; i < param.args.length; i++) {
-            if (param.args[i] instanceof Bundle) {
+    private static int findBundleArgument(Executable executable, Object[] args) {
+        for (int i = 0; i < args.length; i++) {
+            if (args[i] instanceof Bundle) {
                 return i;
             }
         }
-
-        if (param.method instanceof Method) {
-            Class<?>[] parameterTypes = ((Method) param.method).getParameterTypes();
-            for (int i = 0; i < parameterTypes.length; i++) {
-                if (Bundle.class.isAssignableFrom(parameterTypes[i])) {
-                    return i;
-                }
+        Class<?>[] parameterTypes = executable.getParameterTypes();
+        for (int i = 0; i < parameterTypes.length; i++) {
+            if (Bundle.class.isAssignableFrom(parameterTypes[i])) {
+                return i;
             }
         }
-
         return -1;
+    }
+
+    private static String hookId(Method method) {
+        StringBuilder id = new StringBuilder(HOOK_ID_PREFIX).append(method.getName()).append('(');
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        for (int i = 0; i < parameterTypes.length; i++) {
+            if (i > 0) id.append(',');
+            id.append(parameterTypes[i].getName());
+        }
+        return id.append(')').toString();
     }
 }
