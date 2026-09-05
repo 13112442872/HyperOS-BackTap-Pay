@@ -24,9 +24,11 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 15859902
 
       - name: Install Android 17 SDK
-        run: sdkmanager --channel=3 "platforms;android-CinnamonBun" "build-tools;37.0.0"
+        run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
 
       - name: Set up Gradle 9.5.1
         uses: gradle/actions/setup-gradle@v4
