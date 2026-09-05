@@ -4,8 +4,8 @@
     <application
         android:name=".ModuleApp"
         android:allowBackup="false"
-        android:description="配置澎湃OS背部双击/三击支付宝付款码或乘车码，并选择主屏/背屏显示"
-        android:label="HyperOS BackTap Pay"
+        android:description="@string/app_description"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
