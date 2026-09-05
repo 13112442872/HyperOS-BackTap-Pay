@@ -27,8 +27,13 @@ jobs:
         with:
           cmdline-tools-version: 15859902
 
+      - name: Install Android CLI
+        run: curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+
       - name: Install Android 17 SDK
-        run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          android --sdk="$ANDROID_SDK_ROOT" sdk install --canary platforms/android-37 build-tools/37.0.0
 
       - name: Set up Gradle 9.5.1
         uses: gradle/actions/setup-gradle@v4
