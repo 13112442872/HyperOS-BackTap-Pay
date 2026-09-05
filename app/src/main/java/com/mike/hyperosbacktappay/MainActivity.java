@@ -2,7 +2,6 @@ package com.mike.hyperosbacktappay;
 
 import android.app.Activity;
 import android.content.Context;
-import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
@@ -22,7 +21,9 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
-public final class MainActivity extends Activity {
+import io.github.libxposed.service.XposedService;
+
+public final class MainActivity extends Activity implements ModuleApp.ServiceStateListener {
     private static final int COLOR_BG = Color.rgb(246, 246, 248);
     private static final int COLOR_CARD = Color.WHITE;
     private static final int COLOR_TEXT = Color.rgb(30, 30, 32);
@@ -31,9 +32,12 @@ public final class MainActivity extends Activity {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
+    private SharedPreferences legacyPreferences;
     private SharedPreferences preferences;
-    private boolean sharedPreferencesReady;
+    private XposedService xposedService;
+    private boolean serviceReady;
     private boolean loadingUi;
+    private String frameworkInfo = "LSPosed 服务未连接";
 
     private TextView hookStatusText;
     private Switch tipsSwitch;
@@ -51,8 +55,22 @@ public final class MainActivity extends Activity {
             window.setDecorFitsSystemWindows(true);
         }
 
-        preferences = openModulePreferences();
+        legacyPreferences = getSharedPreferences(Config.PREFS_NAME, Context.MODE_PRIVATE);
+        preferences = legacyPreferences;
+        connectService(ModuleApp.getService(), false);
         setContentView(buildContentView());
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        ModuleApp.addServiceStateListener(this, true);
+    }
+
+    @Override
+    protected void onStop() {
+        ModuleApp.removeServiceStateListener(this);
+        super.onStop();
     }
 
     @Override
@@ -61,15 +79,66 @@ public final class MainActivity extends Activity {
         refreshAll();
     }
 
-    @SuppressWarnings("deprecation")
-    private SharedPreferences openModulePreferences() {
-        try {
-            SharedPreferences prefs = getSharedPreferences(Config.PREFS_NAME, Context.MODE_WORLD_READABLE);
-            sharedPreferencesReady = true;
-            return prefs;
-        } catch (Throwable ignored) {
-            sharedPreferencesReady = false;
-            return getSharedPreferences(Config.PREFS_NAME, Context.MODE_PRIVATE);
+    @Override
+    public void onServiceStateChanged(XposedService service) {
+        runOnUiThread(() -> connectService(service, true));
+    }
+
+    private void connectService(XposedService service, boolean refreshUi) {
+        xposedService = service;
+        serviceReady = false;
+        preferences = legacyPreferences;
+        frameworkInfo = "LSPosed 服务未连接";
+
+        if (service != null) {
+            try {
+                SharedPreferences remote = service.getRemotePreferences(Config.PREFS_NAME);
+                preferences = remote;
+                serviceReady = true;
+                frameworkInfo = service.getFrameworkName() + " " + service.getFrameworkVersion()
+                        + " · API " + service.getApiVersion();
+                migrateLegacyPreferences(remote);
+            } catch (Throwable t) {
+                serviceReady = false;
+                preferences = legacyPreferences;
+                frameworkInfo = "Modern Xposed 服务连接失败";
+            }
+        }
+
+        if (refreshUi && hookStatusText != null) {
+            refreshAll();
+        }
+    }
+
+    private void migrateLegacyPreferences(SharedPreferences remote) {
+        if (remote.getBoolean(Config.PREF_MIGRATED_MODERN, false)) {
+            return;
+        }
+
+        SharedPreferences.Editor editor = remote.edit();
+        copyLegacyString(remote, editor, Config.PREF_DOUBLE_ACTION);
+        copyLegacyString(remote, editor, Config.PREF_TRIPLE_ACTION);
+        copyLegacyString(remote, editor, Config.PREF_DOUBLE_DISPLAY);
+        copyLegacyString(remote, editor, Config.PREF_TRIPLE_DISPLAY);
+        if (!remote.contains(Config.PREF_SHOW_TIPS) && legacyPreferences.contains(Config.PREF_SHOW_TIPS)) {
+            editor.putBoolean(
+                    Config.PREF_SHOW_TIPS,
+                    legacyPreferences.getBoolean(Config.PREF_SHOW_TIPS, false)
+            );
+        }
+        editor.putBoolean(Config.PREF_MIGRATED_MODERN, true).commit();
+    }
+
+    private void copyLegacyString(
+            SharedPreferences remote,
+            SharedPreferences.Editor editor,
+            String key
+    ) {
+        if (!remote.contains(key) && legacyPreferences.contains(key)) {
+            String value = legacyPreferences.getString(key, null);
+            if (value != null) {
+                editor.putString(key, value);
+            }
         }
     }
 
@@ -114,7 +183,8 @@ public final class MainActivity extends Activity {
         root.addView(tripleTapViews.card, cardSpacing());
 
         TextView footer = text(
-                "付款码与乘车码都使用 HyperOS 原生“付款码”作为系统触发入口；模块在触发时按配置切换实际功能，因此乘车码配置可跨重启保留。无需 Root。",
+                "v0.3.0 起使用 Modern Xposed API 102、Remote Preferences 与 Hot Reload。"
+                        + "从旧版 Legacy 首次升级仍需让 system_server 加载一次新版模块；之后普通 APK 更新可由 LSPosed 热重载。",
                 13,
                 COLOR_SUBTEXT,
                 false
@@ -136,7 +206,8 @@ public final class MainActivity extends Activity {
         card.addView(hookStatusText, statusLp);
 
         TextView scope = text(
-                "推荐作用域：系统框架 / System Framework\n模块版本：" + BuildConfig.VERSION_NAME,
+                "Modern Xposed API：102\n推荐作用域：系统框架 / System Framework\n模块版本："
+                        + BuildConfig.VERSION_NAME,
                 13,
                 COLOR_SUBTEXT,
                 false
@@ -162,7 +233,7 @@ public final class MainActivity extends Activity {
         card.addView(tipsSwitch, switchLp);
 
         TextView description = text(
-                "开启后，背部双击 / 三击触发完成时会在主屏显示敲击次数和实际功能，方便不用翻到背屏确认。",
+                "开启后，背部双击 / 三击成功触发时在主屏显示敲击次数和实际功能。",
                 13,
                 COLOR_SUBTEXT,
                 false
@@ -175,8 +246,7 @@ public final class MainActivity extends Activity {
             if (loadingUi) {
                 return;
             }
-            if (!sharedPreferencesReady) {
-                toast("LSPosed 共享配置未就绪，请确认模块已启用后重新打开应用");
+            if (!requireModernService()) {
                 refreshTips();
                 return;
             }
@@ -255,8 +325,7 @@ public final class MainActivity extends Activity {
             if (loadingUi || checkedId == -1) {
                 return;
             }
-            if (!sharedPreferencesReady) {
-                toast("LSPosed 共享配置未就绪，请确认模块已启用后重新打开应用");
+            if (!requireModernService()) {
                 refreshGesture(views);
                 return;
             }
@@ -269,13 +338,12 @@ public final class MainActivity extends Activity {
     }
 
     private void requestGestureChange(GestureViews views, String action) {
-        if (!isCurrentHookLoaded()) {
-            toast("当前新版 Hook 尚未加载，请确认 LSPosed 作用域后重启手机一次");
+        if (!requireModernService()) {
             refreshGesture(views);
             return;
         }
-        if (!sharedPreferencesReady) {
-            toast("LSPosed 共享配置未就绪");
+        if (!isCurrentHookLoaded()) {
+            toast("新版 Modern Hook 尚未加载；从 Legacy 首次升级请重启手机一次");
             refreshGesture(views);
             return;
         }
@@ -288,18 +356,6 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        try {
-            Intent intent = new Intent(Config.ACTION_SET_GESTURE);
-            intent.putExtra(Config.EXTRA_SETTING_KEY, views.settingKey);
-            intent.putExtra(Config.EXTRA_FUNCTION, action);
-            sendBroadcast(intent);
-        } catch (Throwable t) {
-            preferences.edit().putString(views.actionPrefKey, previousAction).commit();
-            toast("发送系统框架配置请求失败");
-            refreshGesture(views);
-            return;
-        }
-
         String expectedNative = nativeFunctionForAction(action);
         mainHandler.postDelayed(() -> {
             try {
@@ -308,13 +364,21 @@ public final class MainActivity extends Activity {
                     toast("配置已生效");
                 } else {
                     preferences.edit().putString(views.actionPrefKey, previousAction).commit();
-                    toast("配置未写入，请查看 LSPosed 日志");
+                    toast("系统手势未同步，请查看 LSPosed 日志");
                 }
             } catch (Throwable t) {
                 toast("无法验证系统手势配置");
             }
             refreshGesture(views);
-        }, 450);
+        }, 650);
+    }
+
+    private boolean requireModernService() {
+        if (serviceReady && xposedService != null) {
+            return true;
+        }
+        toast("Modern Xposed 服务未连接，请确认 LSPosed 2.2.0 已启用模块");
+        return false;
     }
 
     private void refreshAll() {
@@ -335,6 +399,8 @@ public final class MainActivity extends Activity {
         loadingUi = true;
         try {
             tipsSwitch.setChecked(preferences.getBoolean(Config.PREF_SHOW_TIPS, false));
+            tipsSwitch.setEnabled(serviceReady);
+            tipsSwitch.setAlpha(serviceReady ? 1.0f : 0.5f);
         } finally {
             loadingUi = false;
         }
@@ -354,41 +420,38 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshHookStatus() {
+        if (hookStatusText == null) {
+            return;
+        }
+
         String hookVersion = Settings.System.getString(getContentResolver(), Config.STATUS_HOOK_VERSION);
         int hookBootCount = Settings.System.getInt(
-                getContentResolver(),
-                Config.STATUS_HOOK_BOOT_COUNT,
-                Integer.MIN_VALUE
-        );
+                getContentResolver(), Config.STATUS_HOOK_BOOT_COUNT, Integer.MIN_VALUE);
         int currentBootCount = Settings.Global.getInt(
-                getContentResolver(),
-                Settings.Global.BOOT_COUNT,
-                Integer.MIN_VALUE
-        );
-
-        String prefsLine = sharedPreferencesReady
-                ? "\n共享配置：正常"
-                : "\n共享配置：未就绪";
+                getContentResolver(), Settings.Global.BOOT_COUNT, Integer.MIN_VALUE);
+        String serviceLine = "\n" + frameworkInfo
+                + (serviceReady ? "\nRemote Preferences：正常" : "\nRemote Preferences：未连接");
 
         if (hookVersion != null && hookBootCount == currentBootCount) {
             if (BuildConfig.VERSION_NAME.equals(hookVersion)) {
-                hookStatusText.setText("● Hook 已加载" + prefsLine);
+                hookStatusText.setText("● Modern Hook 已加载" + serviceLine);
                 hookStatusText.setTextColor(Color.rgb(20, 135, 70));
             } else {
                 hookStatusText.setText(
-                        "⚠ 系统框架仍在运行旧版 Hook " + hookVersion
+                        "⚠ system_server 仍在运行旧 Hook " + hookVersion
                                 + "\n当前 APK：" + BuildConfig.VERSION_NAME
-                                + "\n请手动重启手机加载新版 Hook"
-                                + prefsLine
+                                + "\n从 Legacy 首次升级到 Modern API 102 需重启一次"
+                                + "\n之后更新将优先使用 Hot Reload"
+                                + serviceLine
                 );
                 hookStatusText.setTextColor(Color.rgb(190, 110, 0));
             }
         } else {
             hookStatusText.setText(
-                    "⚠ 本次启动尚未检测到 Hook"
-                            + "\n请确认 LSPosed 已启用模块并勾选“系统框架”"
-                            + "\n首次启用或更新模块后需手动重启手机一次"
-                            + prefsLine
+                    "⚠ 本次启动尚未检测到 Modern Hook"
+                            + "\n请确认 LSPosed 已启用模块，作用域为“系统框架”"
+                            + "\n首次从 Legacy 升级请重启手机一次"
+                            + serviceLine
             );
             hookStatusText.setTextColor(Color.rgb(190, 110, 0));
         }
@@ -398,7 +461,7 @@ public final class MainActivity extends Activity {
         loadingUi = true;
         try {
             String currentSystem = Settings.System.getString(getContentResolver(), views.settingKey);
-            String action = readConfiguredAction(views, currentSystem, true);
+            String action = readConfiguredAction(views, currentSystem, serviceReady);
 
             views.actionGroup.clearCheck();
             views.warningText.setVisibility(View.GONE);
@@ -416,7 +479,7 @@ public final class MainActivity extends Activity {
                     && Config.FUNCTION_BUS.equals(currentSystem);
             boolean nativeActive = expectedNative.equals(currentSystem) || legacyBusActive;
 
-            if (!nativeActive) {
+            if (!nativeActive && serviceReady) {
                 String shown = currentSystem == null ? Config.FUNCTION_NONE : currentSystem;
                 views.warningText.setText(
                         "系统当前绑定：" + shown + "。重新选择当前功能即可恢复模块绑定。"
@@ -431,8 +494,11 @@ public final class MainActivity extends Activity {
                 views.displayGroup.check(views.rearId);
             }
 
-            boolean actionEnabled = !Config.FUNCTION_NONE.equals(action) && nativeActive;
+            boolean actionEnabled = serviceReady
+                    && !Config.FUNCTION_NONE.equals(action)
+                    && nativeActive;
             setDisplayGroupEnabled(views.displayGroup, actionEnabled);
+            setActionGroupEnabled(views.actionGroup, serviceReady);
         } finally {
             loadingUi = false;
         }
@@ -453,7 +519,7 @@ public final class MainActivity extends Activity {
             inferred = Config.FUNCTION_NONE;
         }
 
-        if (migrate && sharedPreferencesReady) {
+        if (migrate) {
             preferences.edit().putString(views.actionPrefKey, inferred).commit();
         }
         return inferred;
@@ -476,6 +542,14 @@ public final class MainActivity extends Activity {
         if (id == views.paymentId) return Config.FUNCTION_PAYMENT;
         if (id == views.busId) return Config.FUNCTION_BUS;
         return null;
+    }
+
+    private void setActionGroupEnabled(RadioGroup group, boolean enabled) {
+        group.setEnabled(enabled);
+        group.setAlpha(enabled ? 1.0f : 0.5f);
+        for (int i = 0; i < group.getChildCount(); i++) {
+            group.getChildAt(i).setEnabled(enabled);
+        }
     }
 
     private void setDisplayGroupEnabled(RadioGroup group, boolean enabled) {
