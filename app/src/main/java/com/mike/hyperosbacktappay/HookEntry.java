@@ -25,44 +25,70 @@ public final class HookEntry extends XposedModule {
     private static final String TARGET_METHOD = "triggerFunction";
     private static final String HOOK_ID_PREFIX = "hyperos-backtap-pay:trigger:";
     private static final long TIP_DEDUP_WINDOW_MS = 800L;
+    private static final long INSTALL_RETRY_DELAY_MS = 1000L;
+    private static final int MAX_INSTALL_ATTEMPTS = 45;
+    private static final int MAX_STATUS_ATTEMPTS = 45;
 
     private final Object tipDedupLock = new Object();
+    private final Object installLock = new Object();
     private final ThreadLocal<Integer> triggerDepth = ThreadLocal.withInitial(() -> 0);
 
     private volatile SharedPreferences preferences;
     private volatile SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
     private volatile Context systemContext;
     private volatile Handler systemMainHandler;
+    private volatile ClassLoader systemServerClassLoader;
+    private volatile boolean hooksInstalled;
+    private volatile boolean statusPublished;
     private String lastTipKey;
     private long lastTipUptime;
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
         log(Log.INFO, TAG, "Modern module loaded in " + param.getProcessName()
+                + ", systemServer=" + param.isSystemServer()
                 + ", API=" + getApiVersion() + ", framework=" + getFrameworkName()
                 + " " + getFrameworkVersion());
+
+        if (param.isSystemServer()) {
+            try {
+                initializeRemotePreferences();
+            } catch (Throwable t) {
+                log(Log.ERROR, TAG, "Remote Preferences init failed during module load", t);
+            }
+        }
     }
 
     @Override
     public void onSystemServerStarting(SystemServerStartingParam param) {
+        systemServerClassLoader = param.getClassLoader();
+        hooksInstalled = false;
+        statusPublished = false;
+
         try {
             initializeRemotePreferences();
-            rememberSystemContext(resolveSystemContext());
-            installTriggerHooks(param.getClassLoader());
-            syncAllNativeActions();
-            publishHookStatus();
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Failed to initialize system_server hooks", t);
+            log(Log.ERROR, TAG, "Remote Preferences init failed", t);
         }
+
+        rememberSystemContext(resolveSystemContext());
+        installOrSchedule(param.getClassLoader(), 1);
     }
 
     @Override
     public boolean onHotReloading(HotReloadingParam param) {
         log(Log.INFO, TAG, "Preparing API 102 hot reload");
+        Handler handler = systemMainHandler;
+        if (handler != null) {
+            handler.removeCallbacksAndMessages(null);
+        }
         detachPreferenceListener();
         preferences = null;
         systemContext = null;
         systemMainHandler = null;
+        systemServerClassLoader = null;
+        hooksInstalled = false;
+        statusPublished = false;
         lastTipKey = null;
         lastTipUptime = 0L;
         triggerDepth.remove();
@@ -72,6 +98,7 @@ public final class HookEntry extends XposedModule {
     @Override
     public void onHotReloaded(HotReloadedParam param) {
         log(Log.INFO, TAG, "Hot reloaded in " + param.getProcessName()
+                + ", systemServer=" + param.isSystemServer()
                 + ", old hooks=" + param.getOldHookHandles().size());
 
         try {
@@ -79,7 +106,7 @@ public final class HookEntry extends XposedModule {
             rememberSystemContext(resolveSystemContext());
 
             ClassLoader targetClassLoader = null;
-            boolean replacedAny = false;
+            int replacedCount = 0;
             for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
                 String id = oldHandle.getId();
                 if (id != null && id.startsWith(HOOK_ID_PREFIX)) {
@@ -87,37 +114,91 @@ public final class HookEntry extends XposedModule {
                         targetClassLoader = oldHandle.getExecutable().getDeclaringClass().getClassLoader();
                     }
                     oldHandle.replaceHook(this::interceptTrigger);
-                    replacedAny = true;
+                    replacedCount++;
                 } else {
                     oldHandle.unhook();
                 }
             }
 
-            if (!replacedAny && targetClassLoader != null) {
-                installTriggerHooks(targetClassLoader);
+            if (replacedCount > 0) {
+                systemServerClassLoader = targetClassLoader;
+                hooksInstalled = true;
+                log(Log.INFO, TAG, "Replaced " + replacedCount + " trigger hook(s) after hot reload");
+                syncAllNativeActionsSafely();
+                publishHookStatusWhenReady(1);
+                return;
             }
 
-            syncAllNativeActions();
-            publishHookStatus();
+            if (param.isSystemServer()) {
+                targetClassLoader = findSystemServerClassLoader();
+                if (targetClassLoader != null) {
+                    systemServerClassLoader = targetClassLoader;
+                    installOrSchedule(targetClassLoader, 1);
+                } else {
+                    log(Log.ERROR, TAG, "Hot reload has no old hook handles and system_server classloader recovery failed");
+                }
+            }
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Hot reload initialization failed", t);
         }
     }
 
-    private void installTriggerHooks(ClassLoader classLoader) throws Exception {
+    private void installOrSchedule(ClassLoader classLoader, int attempt) {
+        if (classLoader == null || hooksInstalled) {
+            return;
+        }
+
+        synchronized (installLock) {
+            if (hooksInstalled) {
+                return;
+            }
+            try {
+                int count = installTriggerHooks(classLoader);
+                if (count <= 0) {
+                    throw new IllegalStateException("No triggerFunction overload found");
+                }
+                hooksInstalled = true;
+                systemServerClassLoader = classLoader;
+                log(Log.INFO, TAG, "Modern hook ready, installed " + count + " triggerFunction hook(s)");
+                syncAllNativeActionsSafely();
+                publishHookStatusWhenReady(1);
+                return;
+            } catch (Throwable t) {
+                if (attempt == 1 || attempt % 10 == 0 || attempt >= MAX_INSTALL_ATTEMPTS) {
+                    log(attempt >= MAX_INSTALL_ATTEMPTS ? Log.ERROR : Log.WARN,
+                            TAG,
+                            "Hook install attempt " + attempt + "/" + MAX_INSTALL_ATTEMPTS + " failed",
+                            t);
+                }
+            }
+        }
+
+        if (attempt < MAX_INSTALL_ATTEMPTS) {
+            getSystemMainHandler().postDelayed(
+                    () -> installOrSchedule(classLoader, attempt + 1),
+                    INSTALL_RETRY_DELAY_MS
+            );
+        }
+    }
+
+    private int installTriggerHooks(ClassLoader classLoader) throws Exception {
         Class<?> clazz = Class.forName(TARGET_CLASS, false, classLoader);
         int count = 0;
         for (Method method : clazz.getDeclaredMethods()) {
             if (!TARGET_METHOD.equals(method.getName())) {
                 continue;
             }
-            method.setAccessible(true);
-            hook(method)
-                    .setId(hookId(method))
-                    .intercept(this::interceptTrigger);
-            count++;
+            try {
+                method.setAccessible(true);
+                hook(method)
+                        .setId(hookId(method))
+                        .intercept(this::interceptTrigger);
+                count++;
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "Unable to hook " + method, t);
+            }
         }
-        log(Log.INFO, TAG, "Installed " + count + " modern triggerFunction hook(s)");
+        return count;
     }
 
     private Object interceptTrigger(XposedInterface.Chain chain) throws Throwable {
@@ -147,6 +228,9 @@ public final class HookEntry extends XposedModule {
             }
 
             rememberSystemContext(extractContext(chain.getThisObject()));
+            if (!statusPublished) {
+                publishHookStatusWhenReady(1);
+            }
 
             String actionPrefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
                     ? Config.PREF_TRIPLE_ACTION
@@ -227,9 +311,13 @@ public final class HookEntry extends XposedModule {
         preferenceListener = null;
     }
 
-    private void syncAllNativeActions() {
-        syncNativeAction(Config.PREF_DOUBLE_ACTION);
-        syncNativeAction(Config.PREF_TRIPLE_ACTION);
+    private void syncAllNativeActionsSafely() {
+        try {
+            syncNativeAction(Config.PREF_DOUBLE_ACTION);
+            syncNativeAction(Config.PREF_TRIPLE_ACTION);
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Failed to sync native actions", t);
+        }
     }
 
     private void syncNativeAction(String prefKey) {
@@ -250,11 +338,7 @@ public final class HookEntry extends XposedModule {
                 ? Config.FUNCTION_NONE
                 : Config.FUNCTION_PAYMENT;
 
-        Context context = systemContext;
-        if (context == null) {
-            context = resolveSystemContext();
-            rememberSystemContext(context);
-        }
+        Context context = ensureSystemContext();
         if (context == null) {
             log(Log.WARN, TAG, "Cannot sync " + settingKey + ": system Context unavailable");
             return;
@@ -314,7 +398,7 @@ public final class HookEntry extends XposedModule {
     }
 
     private void showTriggerTip(String shortcut, String function, String resultSuffix) {
-        Context context = systemContext;
+        Context context = ensureSystemContext();
         if (context == null) {
             return;
         }
@@ -323,21 +407,7 @@ public final class HookEntry extends XposedModule {
         String functionText = Config.FUNCTION_BUS.equals(function) ? "支付宝乘车码" : "支付宝付款码";
         String message = tapText + " · " + functionText + resultSuffix;
 
-        Handler handler = systemMainHandler;
-        if (handler == null && Looper.getMainLooper() != null) {
-            synchronized (this) {
-                handler = systemMainHandler;
-                if (handler == null) {
-                    handler = new Handler(Looper.getMainLooper());
-                    systemMainHandler = handler;
-                }
-            }
-        }
-        if (handler == null) {
-            return;
-        }
-
-        handler.post(() -> {
+        getSystemMainHandler().post(() -> {
             try {
                 Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
             } catch (Throwable t) {
@@ -346,26 +416,79 @@ public final class HookEntry extends XposedModule {
         });
     }
 
-    private void publishHookStatus() {
+    private void publishHookStatusWhenReady(int attempt) {
+        if (!hooksInstalled || statusPublished) {
+            return;
+        }
+
+        Context context = ensureSystemContext();
+        if (context != null) {
+            try {
+                ContentResolver resolver = context.getContentResolver();
+                int bootCount = Settings.Global.getInt(resolver, Settings.Global.BOOT_COUNT, -1);
+                boolean versionOk = Settings.System.putString(
+                        resolver,
+                        Config.STATUS_HOOK_VERSION,
+                        BuildConfig.VERSION_NAME
+                );
+                boolean bootOk = Settings.System.putInt(
+                        resolver,
+                        Config.STATUS_HOOK_BOOT_COUNT,
+                        bootCount
+                );
+                statusPublished = versionOk && bootOk;
+                if (statusPublished) {
+                    log(Log.INFO, TAG, "Published Modern Hook status version="
+                            + BuildConfig.VERSION_NAME + ", bootCount=" + bootCount);
+                    return;
+                }
+                log(Log.WARN, TAG, "Settings.System rejected Hook status write");
+            } catch (Throwable t) {
+                if (attempt == 1 || attempt % 10 == 0) {
+                    log(Log.WARN, TAG, "Hook status publish attempt " + attempt + " failed", t);
+                }
+            }
+        } else if (attempt == 1 || attempt % 10 == 0) {
+            log(Log.WARN, TAG, "system Context not ready for Hook status, attempt=" + attempt);
+        }
+
+        if (!statusPublished && attempt < MAX_STATUS_ATTEMPTS) {
+            getSystemMainHandler().postDelayed(
+                    () -> publishHookStatusWhenReady(attempt + 1),
+                    INSTALL_RETRY_DELAY_MS
+            );
+        }
+    }
+
+    private Handler getSystemMainHandler() {
+        Handler handler = systemMainHandler;
+        if (handler != null) {
+            return handler;
+        }
+        synchronized (this) {
+            handler = systemMainHandler;
+            if (handler == null) {
+                Looper looper = Looper.getMainLooper();
+                if (looper == null) {
+                    looper = Looper.myLooper();
+                }
+                if (looper == null) {
+                    throw new IllegalStateException("No Looper available in system_server");
+                }
+                handler = new Handler(looper);
+                systemMainHandler = handler;
+            }
+        }
+        return handler;
+    }
+
+    private Context ensureSystemContext() {
         Context context = systemContext;
         if (context == null) {
             context = resolveSystemContext();
             rememberSystemContext(context);
         }
-        if (context == null) {
-            log(Log.WARN, TAG, "Unable to publish Hook status: system Context unavailable");
-            return;
-        }
-
-        try {
-            ContentResolver resolver = context.getContentResolver();
-            int bootCount = Settings.Global.getInt(resolver, Settings.Global.BOOT_COUNT, -1);
-            Settings.System.putString(resolver, Config.STATUS_HOOK_VERSION, BuildConfig.VERSION_NAME);
-            Settings.System.putInt(resolver, Config.STATUS_HOOK_BOOT_COUNT, bootCount);
-            log(Log.INFO, TAG, "Published Modern Hook status version=" + BuildConfig.VERSION_NAME);
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Failed to publish Hook status", t);
-        }
+        return context;
     }
 
     private void rememberSystemContext(Context context) {
@@ -395,6 +518,27 @@ public final class HookEntry extends XposedModule {
             log(Log.DEBUG, TAG, "ActivityThread system Context not ready", t);
             return null;
         }
+    }
+
+    private ClassLoader findSystemServerClassLoader() {
+        ClassLoader[] candidates = new ClassLoader[]{
+                systemServerClassLoader,
+                Thread.currentThread().getContextClassLoader(),
+                ClassLoader.getSystemClassLoader()
+        };
+        for (ClassLoader candidate : candidates) {
+            if (candidate == null) {
+                continue;
+            }
+            try {
+                Class.forName(TARGET_CLASS, false, candidate);
+                log(Log.INFO, TAG, "Recovered system_server classloader: " + candidate);
+                return candidate;
+            } catch (Throwable ignored) {
+                // Try the next candidate.
+            }
+        }
+        return null;
     }
 
     private Context extractContext(Object object) {
@@ -450,7 +594,9 @@ public final class HookEntry extends XposedModule {
         StringBuilder id = new StringBuilder(HOOK_ID_PREFIX).append(method.getName()).append('(');
         Class<?>[] parameterTypes = method.getParameterTypes();
         for (int i = 0; i < parameterTypes.length; i++) {
-            if (i > 0) id.append(',');
+            if (i > 0) {
+                id.append(',');
+            }
             id.append(parameterTypes[i].getName());
         }
         return id.append(')').toString();
