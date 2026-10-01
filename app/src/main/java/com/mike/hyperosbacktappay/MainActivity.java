@@ -41,6 +41,11 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
 
     private TextView hookStatusText;
     private Switch tipsSwitch;
+    private Switch rearSunlight;
+    private android.widget.EditText rearSeconds;
+    private android.widget.SeekBar rearBrightness;
+    private TextView rearBrightnessLabel;
+    private android.widget.Button rearSave;
     private GestureViews doubleTapViews;
     private GestureViews tripleTapViews;
 
@@ -50,10 +55,15 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
         Window window = getWindow();
         window.setStatusBarColor(COLOR_BG);
         window.setNavigationBarColor(COLOR_BG);
-        window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(true);
-        }
+        window.setDecorFitsSystemWindows(false);
+        window.setStatusBarContrastEnforced(false);
+        window.setNavigationBarContrastEnforced(false);
+        window.getDecorView().setBackgroundColor(COLOR_BG);
+        window.getInsetsController().setSystemBarsAppearance(
+                android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
 
         legacyPreferences = getSharedPreferences(Config.PREFS_NAME, Context.MODE_PRIVATE);
         preferences = legacyPreferences;
@@ -146,6 +156,15 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
         scrollView.setBackgroundColor(COLOR_BG);
+        scrollView.setClipToPadding(true);
+        scrollView.setOnApplyWindowInsetsListener((view, insets) -> {
+            android.graphics.Insets safe = insets.getInsets(
+                    android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
+            android.graphics.Insets keyboard = insets.getInsets(android.view.WindowInsets.Type.ime());
+            view.setPadding(safe.left, safe.top, safe.right, Math.max(safe.bottom, keyboard.bottom));
+            return insets;
+        });
+        scrollView.requestApplyInsets();
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -155,7 +174,11 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        root.addView(text("HyperOS BackTap Pay", 26, COLOR_TEXT, true));
+        root.addView(text("HYPEROS  /  BACK TAP", 11, COLOR_ACCENT, true));
+        TextView title = text("轻敲 · 快捷码", 30, COLOR_TEXT, true);
+        LinearLayout.LayoutParams titleLp = matchWrap();
+        titleLp.topMargin = dp(8);
+        root.addView(title, titleLp);
 
         TextView subtitle = text("澎湃 OS 背部轻敲支付宝快捷码", 14, COLOR_SUBTEXT, false);
         LinearLayout.LayoutParams subtitleLp = wrap();
@@ -165,6 +188,7 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
 
         root.addView(buildStatusCard());
         root.addView(buildTipsCard(), cardSpacing());
+        root.addView(buildRearCard(), cardSpacing());
 
         doubleTapViews = buildGestureCard(
                 "背部双击",
@@ -194,6 +218,110 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
         root.addView(footer, footerLp);
 
         return scrollView;
+    }
+
+    private View buildRearCard() {
+        LinearLayout panel = card();
+        panel.addView(sectionTitle("背屏码页显示"));
+        panel.addView(text("背部双击 / 三击，以及双击电源键打开的背屏支付宝付款码 / 乘车码，共用以下设置。", 13, COLOR_SUBTEXT, false));
+        TextView durationTitle = text("显示时长", 15, COLOR_TEXT, true);
+        LinearLayout.LayoutParams durationLp = matchWrap();
+        durationLp.topMargin = dp(20);
+        panel.addView(durationTitle, durationLp);
+        LinearLayout timeRow = new LinearLayout(this);
+        timeRow.setGravity(Gravity.CENTER_VERTICAL);
+        timeRow.setPadding(dp(16), dp(4), dp(16), dp(4));
+        timeRow.setBackground(roundBackground(Color.rgb(244, 246, 250), 14));
+        rearSeconds = new android.widget.EditText(this);
+        rearSeconds.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        rearSeconds.setSingleLine(true);
+        rearSeconds.setTextColor(COLOR_TEXT);
+        rearSeconds.setTextSize(26);
+        rearSeconds.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+        rearSeconds.setBackgroundColor(Color.TRANSPARENT);
+        rearSeconds.setPadding(0, dp(8), dp(8), dp(8));
+        rearSeconds.setSelectAllOnFocus(true);
+        timeRow.addView(rearSeconds, new LinearLayout.LayoutParams(0, dp(56), 1));
+        timeRow.addView(text("秒  /  1–300", 13, COLOR_SUBTEXT, false));
+        LinearLayout.LayoutParams timeLp = matchWrap();
+        timeLp.topMargin = dp(8);
+        panel.addView(timeRow, timeLp);
+        LinearLayout presets = new LinearLayout(this);
+        for (int seconds : new int[]{15, 30, 60, 120}) {
+            TextView preset = text(seconds + " 秒", 13, COLOR_ACCENT, true);
+            preset.setGravity(Gravity.CENTER);
+            preset.setBackground(roundBackground(Color.rgb(235, 243, 255), 10));
+            preset.setOnClickListener(v -> rearSeconds.setText(String.valueOf(seconds)));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(36), 1);
+            if (seconds != 120) lp.rightMargin = dp(8);
+            presets.addView(preset, lp);
+        }
+        LinearLayout.LayoutParams presetsLp = matchWrap();
+        presetsLp.topMargin = dp(10);
+        panel.addView(presets, presetsLp);
+        rearBrightnessLabel = text("显示亮度  ·  100%", 15, COLOR_TEXT, true);
+        LinearLayout.LayoutParams brightLp = matchWrap();
+        brightLp.topMargin = dp(22);
+        panel.addView(rearBrightnessLabel, brightLp);
+        rearBrightness = new android.widget.SeekBar(this);
+        rearBrightness.setMax(99);
+        rearBrightness.setProgressTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        rearBrightness.setThumbTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        rearBrightness.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(224, 231, 243)));
+        rearBrightness.setMinimumHeight(dp(48));
+        rearBrightness.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(android.widget.SeekBar bar, int progress, boolean fromUser) {
+                rearBrightnessLabel.setText("显示亮度  ·  " + (progress + 1) + "%");
+            }
+            public void onStartTrackingTouch(android.widget.SeekBar bar) { }
+            public void onStopTrackingTouch(android.widget.SeekBar bar) { }
+        });
+        panel.addView(rearBrightness, matchWrap());
+        rearSunlight = new Switch(this);
+        rearSunlight.setText("刷码时开启阳光模式");
+        rearSunlight.setTextSize(15);
+        rearSunlight.setTextColor(COLOR_TEXT);
+        rearSunlight.setPadding(0, dp(8), 0, dp(8));
+        panel.addView(rearSunlight, matchWrap());
+        panel.addView(text("联动系统背屏阳光模式，退出或锁屏后恢复原设置。实际增亮由环境光及系统策略决定。", 12, COLOR_SUBTEXT, false));
+        rearSave = new android.widget.Button(this);
+        rearSave.setText("保存背屏设置");
+        rearSave.setTextSize(15);
+        rearSave.setTextColor(Color.WHITE);
+        rearSave.setAllCaps(false);
+        rearSave.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+        rearSave.setBackground(new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(0x33FFFFFF), roundBackground(COLOR_ACCENT, 14), null));
+        rearSave.setElevation(0);
+        rearSave.setOnClickListener(v -> {
+            if (!requireModernService()) return;
+            int seconds;
+            try { seconds = Integer.parseInt(rearSeconds.getText().toString().trim()); }
+            catch (NumberFormatException e) { rearSeconds.setError("请输入 1～300 的整数"); return; }
+            if (seconds < 1 || seconds > 300) { rearSeconds.setError("范围为 1～300 秒"); return; }
+            boolean ok = preferences.edit().putInt(Config.PREF_REAR_SECONDS, seconds)
+                    .putInt(Config.PREF_REAR_BRIGHTNESS, rearBrightness.getProgress() + 1)
+                    .putBoolean(Config.PREF_REAR_SUNLIGHT, rearSunlight.isChecked()).commit();
+            toast(ok ? "已保存，下次触发生效" : "保存失败");
+        });
+        LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+        saveLp.topMargin = dp(12);
+        saveLp.bottomMargin = dp(14);
+        panel.addView(rearSave, saveLp);
+        panel.addView(text("锁屏即恢复系统控制 · 再次触发重新计时", 12, COLOR_SUBTEXT, false));
+        refreshRear();
+        return panel;
+    }
+
+    private void refreshRear() {
+        if (rearSeconds == null) return;
+        rearSeconds.setText(String.valueOf(preferences.getInt(Config.PREF_REAR_SECONDS, Config.DEFAULT_REAR_SECONDS)));
+        rearBrightness.setProgress(Math.max(1, Math.min(100, preferences.getInt(Config.PREF_REAR_BRIGHTNESS, Config.DEFAULT_REAR_BRIGHTNESS))) - 1);
+        rearSeconds.setEnabled(serviceReady);
+        rearBrightness.setEnabled(serviceReady);
+        rearSave.setEnabled(serviceReady);
+        rearSunlight.setChecked(preferences.getBoolean(Config.PREF_REAR_SUNLIGHT, false));
+        rearSunlight.setEnabled(serviceReady);
     }
 
     private View buildStatusCard() {
@@ -281,13 +409,13 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
         views.card.addView(actionLabel, labelLp);
 
         views.actionGroup = new RadioGroup(this);
-        views.actionGroup.setOrientation(LinearLayout.VERTICAL);
+        views.actionGroup.setOrientation(LinearLayout.HORIZONTAL);
         views.offId = View.generateViewId();
         views.paymentId = View.generateViewId();
         views.busId = View.generateViewId();
-        views.actionGroup.addView(radio("关闭", views.offId));
-        views.actionGroup.addView(radio("支付宝付款码", views.paymentId));
-        views.actionGroup.addView(radio("支付宝乘车码", views.busId));
+        addSegment(views.actionGroup, radio("关闭", views.offId), false);
+        addSegment(views.actionGroup, radio("付款码", views.paymentId), false);
+        addSegment(views.actionGroup, radio("乘车码", views.busId), true);
         LinearLayout.LayoutParams groupLp = matchWrap();
         groupLp.topMargin = dp(4);
         views.card.addView(views.actionGroup, groupLp);
@@ -305,8 +433,8 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
         views.displayGroup.setOrientation(LinearLayout.HORIZONTAL);
         views.mainId = View.generateViewId();
         views.rearId = View.generateViewId();
-        views.displayGroup.addView(radio("主屏", views.mainId));
-        views.displayGroup.addView(radio("背屏", views.rearId));
+        addSegment(views.displayGroup, radio("主屏显示", views.mainId), false);
+        addSegment(views.displayGroup, radio("背屏显示", views.rearId), true);
         LinearLayout.LayoutParams displayGroupLp = matchWrap();
         displayGroupLp.topMargin = dp(4);
         views.card.addView(views.displayGroup, displayGroupLp);
@@ -382,6 +510,7 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
     }
 
     private void refreshAll() {
+        refreshRear();
         refreshHookStatus();
         refreshTips();
         if (doubleTapViews != null) {
@@ -605,9 +734,34 @@ public final class MainActivity extends Activity implements ModuleApp.ServiceSta
                 },
                 new int[]{COLOR_ACCENT, Color.rgb(135, 135, 142)}
         ));
-        button.setGravity(Gravity.CENTER_VERTICAL);
-        button.setPadding(0, dp(3), dp(12), dp(3));
+        button.setButtonDrawable((android.graphics.drawable.Drawable) null);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(dp(44));
+        button.setMinimumWidth(0);
+        button.setPadding(dp(10), dp(8), dp(10), dp(8));
+        button.setTextSize(14);
+        button.setTextColor(new android.content.res.ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{COLOR_ACCENT, COLOR_SUBTEXT}));
+        android.graphics.drawable.StateListDrawable states = new android.graphics.drawable.StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_checked}, roundBackground(Color.rgb(231, 241, 255), 12));
+        states.addState(new int[]{}, roundBackground(Color.rgb(245, 247, 250), 12));
+        button.setBackground(new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(0x181677FF), states, null));
         return button;
+    }
+
+    private GradientDrawable roundBackground(int color, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radius));
+        return drawable;
+    }
+
+    private void addSegment(RadioGroup group, RadioButton button, boolean last) {
+        RadioGroup.LayoutParams lp = new RadioGroup.LayoutParams(0, dp(46), 1);
+        if (!last) lp.rightMargin = dp(8);
+        group.addView(button, lp);
     }
 
     private LinearLayout.LayoutParams cardSpacing() {

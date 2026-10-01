@@ -11,6 +11,11 @@ public final class Config {
     public static final String PREF_DOUBLE_DISPLAY = "double_display";
     public static final String PREF_TRIPLE_DISPLAY = "triple_display";
     public static final String PREF_SHOW_TIPS = "show_tips";
+    public static final String PREF_REAR_SECONDS = "rear_seconds";
+    public static final String PREF_REAR_BRIGHTNESS = "rear_brightness";
+    public static final String PREF_REAR_SUNLIGHT = "rear_sunlight";
+    public static final int DEFAULT_REAR_SECONDS = 30;
+    public static final int DEFAULT_REAR_BRIGHTNESS = 100;
 
     public static final String DISPLAY_MAIN = "main";
     public static final String DISPLAY_REAR = "rear";

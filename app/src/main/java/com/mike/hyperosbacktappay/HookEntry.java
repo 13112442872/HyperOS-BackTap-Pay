@@ -38,6 +38,7 @@ public final class HookEntry extends XposedModule {
     private volatile Context systemContext;
     private volatile Handler systemMainHandler;
     private volatile ClassLoader systemServerClassLoader;
+    private volatile RearSession rearSession;
     private volatile boolean hooksInstalled;
     private volatile boolean statusPublished;
     private String lastTipKey;
@@ -60,6 +61,13 @@ public final class HookEntry extends XposedModule {
     }
 
     @Override
+    public void onPackageReady(PackageReadyParam param) {
+        if (!"com.eg.android.AlipayGphone".equals(param.getPackageName())) return;
+        try { AlipayRearTimeout.install(this); }
+        catch (Throwable t) { log(Log.ERROR, TAG, "Alipay rear timeout hook unavailable", t); }
+    }
+
+    @Override
     public void onSystemServerStarting(SystemServerStartingParam param) {
         systemServerClassLoader = param.getClassLoader();
         hooksInstalled = false;
@@ -78,6 +86,8 @@ public final class HookEntry extends XposedModule {
     @Override
     public boolean onHotReloading(HotReloadingParam param) {
         log(Log.INFO, TAG, "Preparing API 102 hot reload");
+        if (rearSession != null) rearSession.end();
+        rearSession = null;
         Handler handler = systemMainHandler;
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
@@ -122,6 +132,7 @@ public final class HookEntry extends XposedModule {
 
             if (replacedCount > 0) {
                 systemServerClassLoader = targetClassLoader;
+                installRearHooks(targetClassLoader);
                 hooksInstalled = true;
                 log(Log.INFO, TAG, "Replaced " + replacedCount + " trigger hook(s) after hot reload");
                 syncAllNativeActionsSafely();
@@ -157,6 +168,7 @@ public final class HookEntry extends XposedModule {
                 if (count <= 0) {
                     throw new IllegalStateException("No triggerFunction overload found");
                 }
+                installRearHooks(classLoader);
                 hooksInstalled = true;
                 systemServerClassLoader = classLoader;
                 log(Log.INFO, TAG, "Modern hook ready, installed " + count + " triggerFunction hook(s)");
@@ -178,6 +190,19 @@ public final class HookEntry extends XposedModule {
                     () -> installOrSchedule(classLoader, attempt + 1),
                     INSTALL_RETRY_DELAY_MS
             );
+        }
+    }
+
+    private void installRearHooks(ClassLoader classLoader) {
+        if (rearSession != null) return;
+        RearSession session = new RearSession(this, getSystemMainHandler(), () -> preferences);
+        try {
+            session.install(classLoader);
+            rearSession = session;
+            log(Log.INFO, TAG, "Rear session window/power hooks ready");
+        } catch (Throwable t) {
+            session.end();
+            log(Log.ERROR, TAG, "Rear session hooks unavailable", t);
         }
     }
 
@@ -218,7 +243,8 @@ public final class HookEntry extends XposedModule {
                     functionIndex = i;
                     function = (String) arg;
                 } else if (Config.SETTING_BACK_DOUBLE.equals(arg)
-                        || Config.SETTING_BACK_TRIPLE.equals(arg)) {
+                        || Config.SETTING_BACK_TRIPLE.equals(arg)
+                        || "double_click_power_key".equals(arg)) {
                     shortcut = (String) arg;
                 }
             }
@@ -230,6 +256,24 @@ public final class HookEntry extends XposedModule {
             rememberSystemContext(extractContext(chain.getThisObject()));
             if (!statusPublished) {
                 publishHookStatusWhenReady(1);
+            }
+
+            if ("double_click_power_key".equals(shortcut)) {
+                int index = findBundleArgument(chain.getExecutable(), args);
+                Bundle extras = index >= 0 && args[index] instanceof Bundle ? (Bundle) args[index] : null;
+                boolean rear = extras != null
+                        && extras.getInt(Config.DISPLAY_BUNDLE_KEY, Config.DISPLAY_ID_MAIN) == Config.DISPLAY_ID_REAR;
+                if (!rear || depth != 0 || rearSession == null) return chain.proceed();
+                RearSession session = rearSession;
+                long token = session.begin();
+                try {
+                    Object result = chain.proceed();
+                    if (Boolean.FALSE.equals(result)) session.failed(token);
+                    return result;
+                } catch (Throwable t) {
+                    session.failed(token);
+                    throw t;
+                }
             }
 
             String actionPrefKey = Config.SETTING_BACK_TRIPLE.equals(shortcut)
@@ -264,7 +308,23 @@ public final class HookEntry extends XposedModule {
                 log(Log.WARN, TAG, "Matched BackTap action but no Bundle argument was found");
             }
 
-            Object result = chain.proceed(args);
+            RearSession session = rearSession;
+            long token = -1L;
+            if (depth == 0 && session != null) {
+                if (bundleIndex >= 0 && readDisplayId(displayPrefKey) == Config.DISPLAY_ID_REAR) {
+                    token = session.begin();
+                } else {
+                    session.end();
+                }
+            }
+            Object result;
+            try {
+                result = chain.proceed(args);
+            } catch (Throwable t) {
+                if (session != null && token >= 0) session.failed(token);
+                throw t;
+            }
+            if (Boolean.FALSE.equals(result) && session != null && token >= 0) session.failed(token);
             if (depth == 0 && readShowTips() && shouldShowTip(shortcut, function)) {
                 String suffix = "";
                 if (result instanceof Boolean) {
